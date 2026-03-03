@@ -16,7 +16,7 @@ def init_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Users table - updated to ensure password is NOT NULL for registered users
+    # Users table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,7 +26,7 @@ def init_database():
     )
     """)
     
-    # Favorites table (Home, Work, Gym, etc.)
+    # Favorites table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS favorites (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +42,7 @@ def init_database():
         )
     ''')
     
-    # History table (recent destinations)
+    # History table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,7 +304,6 @@ def draw_rounded_rect(img, pt1, pt2, color, thickness=-1, radius=10):
         cv2.circle(img, (x1+radius, y2-radius), radius, color, -1)
         cv2.circle(img, (x2-radius, y2-radius), radius, color, -1)
     else:
-        # Outlined rectangle (simplified)
         cv2.rectangle(img, pt1, pt2, color, thickness)
 
 def registration_screen():
@@ -319,7 +318,7 @@ def registration_screen():
     
     while True:
         frame = np.zeros((500, 600, 3), dtype=np.uint8)
-        frame[:] = (20, 20, 25)  # Dark blue-gray background
+        frame[:] = (20, 20, 25)  # Dark blue gray background
         
         # Title
         cv2.putText(frame, "CREATE ACCOUNT", (140, 50),
@@ -437,7 +436,6 @@ def registration_screen():
                 confirm_password += char
 
 def login_screen():
-    """Enhanced login screen with registration option"""
     username = ""
     password = ""
     active_field = "username"
@@ -446,7 +444,7 @@ def login_screen():
     
     while True:
         frame = np.zeros((500, 600, 3), dtype=np.uint8)
-        frame[:] = (20, 20, 25)  # Dark blue-gray background
+        frame[:] = (20, 20, 25)  # Dark blue gray background
         
         # Title
         cv2.putText(frame, "AI DRIVER LOGIN", (160, 60),
@@ -538,7 +536,7 @@ init_database()
 # Run login/registration flow
 current_user_id = login_screen()
 
-# ==================== MAIN SIMULATION CODE ====================
+# MAIN CODE
 
 SCREEN_WIDTH = 1200
 SIM_HEIGHT = 700
@@ -667,12 +665,6 @@ def get_drop_off_point(landmark_x, landmark_y):
         return (landmark_x, nearest_y + offset)
 
 def parse_destination(text, car_x, car_y, user_id):
-    """
-    Enhanced destination parsing with support for:
-    - Saved favorites (home, work, etc.)
-    - Recent destinations
-    - Natural language processing
-    """
     text = text.lower().strip()
     
     # Check for save command
@@ -736,7 +728,6 @@ def parse_destination(text, car_x, car_y, user_id):
     return None, None, None
 
 def find_grid_path(start, goal):
-    """Simple grid pathfinding"""
     sx, sy = start
     gx, gy = goal
     
@@ -1368,7 +1359,7 @@ while running:
                 
                 dist = int(np.sqrt((road_pos[0]-car_x)**2 + (road_pos[1]-car_y)**2))
                 add_chat("Driver", f"Going to {dest_name} ({dist}m)...")
-            elif result[0]:  # Message like "Saved as home"
+            elif result[0]: 
                 add_chat("Driver", result[0])
             else:
                 add_chat("Driver", "I don't know that place. Try: 'home', 'mall', 'save this as work'...")
