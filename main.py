@@ -7,16 +7,17 @@ import random
 import sqlite3
 import os
 import hashlib
+import math
+from collections import deque
+from enum import Enum
 
 # Database setup
 DB_PATH = "ai_driver.db"
 
 def init_database():
-    """Initialize SQLite database with tables for users, favorites, and history"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Users table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,7 +27,6 @@ def init_database():
     )
     """)
     
-    # Favorites table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS favorites (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +42,6 @@ def init_database():
         )
     ''')
     
-    # History table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +55,6 @@ def init_database():
         )
     ''')
     
-    # Preferences table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS preferences (
             user_id INTEGER,
@@ -71,11 +69,9 @@ def init_database():
     conn.close()
 
 def hash_password(password):
-    """Hash password using SHA256"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def check_user_exists(username):
-    """Check if username already exists in database"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
@@ -84,32 +80,22 @@ def check_user_exists(username):
     return result is not None
 
 def register_user(username, password):
-    """Register a new user. Returns (success, message, user_id)"""
-    # Validation
     if not username or not password:
         return False, "Username and password required", None
-    
     if len(username) < 3:
         return False, "Username must be at least 3 characters", None
-    
     if len(password) < 4:
         return False, "Password must be at least 4 characters", None
-    
     if not re.match(r'^[a-zA-Z0-9_]+$', username):
         return False, "Username: letters, numbers, underscores only", None
-    
     if check_user_exists(username):
         return False, f"Username '{username}' already exists", None
     
-    # Create user
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
         hashed_pw = hash_password(password)
-        cursor.execute(
-            "INSERT INTO users (username, password) VALUES (?, ?)",
-            (username, hashed_pw)
-        )
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_pw))
         user_id = cursor.lastrowid
         conn.commit()
         return True, "Registration successful", user_id
@@ -119,24 +105,18 @@ def register_user(username, password):
         conn.close()
 
 def authenticate_user(username, password):
-    """Authenticate existing user. Returns user_id or None"""
     if not username or not password:
         return None
-    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id, password FROM users WHERE username = ?", (username,))
     result = cursor.fetchone()
     conn.close()
-    
-    if result:
-        stored_hash = result[1]
-        if stored_hash == hash_password(password):
-            return result[0]
+    if result and result[1] == hash_password(password):
+        return result[0]
     return None
 
 def get_or_create_user(username):
-    """Legacy function - now requires registration first"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
@@ -145,10 +125,8 @@ def get_or_create_user(username):
     return result[0] if result else None
 
 def add_favorite(user_id, name, landmark_name, pos_x, pos_y, category="general"):
-    """Add a favorite location for user"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     try:
         cursor.execute('''
             INSERT OR REPLACE INTO favorites (user_id, name, landmark_name, pos_x, pos_y, category)
@@ -163,644 +141,575 @@ def add_favorite(user_id, name, landmark_name, pos_x, pos_y, category="general")
         conn.close()
 
 def get_favorite(user_id, name):
-    """Get favorite location by name"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     cursor.execute('''
         SELECT landmark_name, pos_x, pos_y FROM favorites 
         WHERE user_id = ? AND name = ?
     ''', (user_id, name.lower()))
-    
     result = cursor.fetchone()
     conn.close()
-    
     if result:
         return {"landmark_name": result[0], "x": result[1], "y": result[2]}
     return None
 
-def get_all_favorites(user_id):
-    """Get all favorites for user"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT name, landmark_name, pos_x, pos_y, category FROM favorites 
-        WHERE user_id = ?
-    ''', (user_id,))
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    return [{"name": r[0], "landmark": r[1], "x": r[2], "y": r[3], "category": r[4]} for r in results]
-
 def add_to_history(user_id, landmark_name, pos_x, pos_y):
-    """Add destination to history"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # Check if this destination exists in history
     cursor.execute('''
         SELECT id, frequency FROM history 
         WHERE user_id = ? AND landmark_name = ?
     ''', (user_id, landmark_name))
-    
     result = cursor.fetchone()
-    
     if result:
-        # Update frequency
         cursor.execute('''
             UPDATE history SET frequency = ?, visited_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (result[1] + 1, result[0]))
     else:
-        # Insert new
         cursor.execute('''
             INSERT INTO history (user_id, landmark_name, pos_x, pos_y)
             VALUES (?, ?, ?, ?)
         ''', (user_id, landmark_name, pos_x, pos_y))
-    
     conn.commit()
     conn.close()
 
-def get_recent_destinations(user_id, limit=5):
-    """Get recent destinations for user"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT landmark_name, pos_x, pos_y, visited_at, frequency
-        FROM history 
-        WHERE user_id = ?
-        ORDER BY visited_at DESC
-        LIMIT ?
-    ''', (user_id, limit))
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    return [{"name": r[0], "x": r[1], "y": r[2], "last_visit": r[3], "frequency": r[4]} for r in results]
+# ==================== REALISTIC TRAFFIC SYSTEM ====================
 
-def get_frequent_destinations(user_id, limit=3):
-    """Get most frequent destinations"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT landmark_name, pos_x, pos_y, frequency
-        FROM history 
-        WHERE user_id = ?
-        ORDER BY frequency DESC
-        LIMIT ?
-    ''', (user_id, limit))
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    return [{"name": r[0], "x": r[1], "y": r[2], "frequency": r[3]} for r in results]
+class AgentType(Enum):
+    HUMAN = "human"
+    AI_RANDOM = "ai_random"
+    AI_EFFICIENT = "ai_efficient"
+    AI_AGGRESSIVE = "ai_aggressive"
 
-def set_preference(user_id, key, value):
-    """Set user preference"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO preferences (user_id, pref_key, pref_value)
-        VALUES (?, ?, ?)
-    ''', (user_id, key, value))
-    
-    conn.commit()
-    conn.close()
+class TrafficLightState(Enum):
+    RED = "red"
+    GREEN = "green"
+    YELLOW = "yellow"
 
-def get_preference(user_id, key, default=None):
-    """Get user preference"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT pref_value FROM preferences 
-        WHERE user_id = ? AND pref_key = ?
-    ''', (user_id, key))
-    
-    result = cursor.fetchone()
-    conn.close()
-    
-    return result[0] if result else default
-
-def draw_rounded_rect(img, pt1, pt2, color, thickness=-1, radius=10):
-    """Draw a rectangle with rounded corners"""
-    x1, y1 = pt1
-    x2, y2 = pt2
-    
-    # Ensure radius isn't too large
-    radius = min(radius, (x2-x1)//2, (y2-y1)//2)
-    
-    if thickness == -1:
-        # Filled rectangle
-        cv2.rectangle(img, (x1+radius, y1), (x2-radius, y2), color, -1)
-        cv2.rectangle(img, (x1, y1+radius), (x2, y2-radius), color, -1)
-        cv2.circle(img, (x1+radius, y1+radius), radius, color, -1)
-        cv2.circle(img, (x2-radius, y1+radius), radius, color, -1)
-        cv2.circle(img, (x1+radius, y2-radius), radius, color, -1)
-        cv2.circle(img, (x2-radius, y2-radius), radius, color, -1)
-    else:
-        cv2.rectangle(img, pt1, pt2, color, thickness)
-
-def registration_screen():
-    """Registration screen with validation"""
-    username = ""
-    password = ""
-    confirm_password = ""
-    active_field = "username"
-    message = ""
-    message_color = (0, 0, 255)  # Red for errors
-    success = False
-    
-    while True:
-        frame = np.zeros((500, 600, 3), dtype=np.uint8)
-        frame[:] = (20, 20, 25)  # Dark blue gray background
+class TrafficLight:
+    def __init__(self, x, y, orientation, id):
+        self.x = x
+        self.y = y
+        self.orientation = orientation
+        self.id = id
+        self.state = TrafficLightState.GREEN
+        self.timer = random.randint(0, 300)
+        self.green_duration = 150
+        self.yellow_duration = 30
+        self.red_duration = 120
+        self.queue_length = 0
+        self.waiting_vehicles = []
+        self.adaptive_mode = True
         
-        # Title
-        cv2.putText(frame, "CREATE ACCOUNT", (140, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+    def update(self, vehicles, all_lights, dt=1):
+        self.waiting_vehicles = []
+        for v in vehicles:
+            if v.state == "driving" and v.waiting_at_light and v.target_light == self:
+                self.waiting_vehicles.append(v.id)
+                
+        self.queue_length = len(self.waiting_vehicles)
         
-        # Subtitle
-        cv2.putText(frame, "Join AI Driver today", (200, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-        
-        y_offset = 140
-        
-        # Username field
-        cv2.putText(frame, "Username", (150, y_offset-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
-                      (0, 255, 255) if active_field=="username" else (100, 100, 100), 2)
-        cv2.putText(frame, username + ("_" if active_field=="username" else ""),
-                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        y_offset += 70
-        
-        # Password field
-        cv2.putText(frame, "Password", (150, y_offset-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
-                      (0, 255, 255) if active_field=="password" else (100, 100, 100), 2)
-        hidden = "*" * len(password)
-        cv2.putText(frame, hidden + ("_" if active_field=="password" else ""),
-                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        y_offset += 70
-        
-        # Confirm Password field
-        cv2.putText(frame, "Confirm Password", (150, y_offset-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
-        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
-                      (0, 255, 255) if active_field=="confirm" else (100, 100, 100), 2)
-        hidden_conf = "*" * len(confirm_password)
-        cv2.putText(frame, hidden_conf + ("_" if active_field=="confirm" else ""),
-                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        # Message/Error display
-        if message:
-            y_msg = 380
-            # Split long messages
-            words = message.split()
-            lines = []
-            current_line = ""
-            for word in words:
-                if len(current_line + word) < 40:
-                    current_line += word + " "
-                else:
-                    lines.append(current_line.strip())
-                    current_line = word + " "
-            if current_line:
-                lines.append(current_line.strip())
+        if not self.adaptive_mode:
+            self._fixed_timing_update()
+            return
             
-            for i, line in enumerate(lines):
-                cv2.putText(frame, line, (150, y_msg + i*20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, message_color, 1)
+        self.timer += dt
+        self._state_machine_update()
         
-        # Instructions
-        cv2.putText(frame, "TAB: Next Field | ENTER: Register | ESC: Back to Login",
-                    (100, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+    def _state_machine_update(self):
+        cycle_pos = self.timer % (self.green_duration + self.yellow_duration + self.red_duration)
+        if cycle_pos < self.green_duration:
+            new_state = TrafficLightState.GREEN
+        elif cycle_pos < self.green_duration + self.yellow_duration:
+            new_state = TrafficLightState.YELLOW
+        else:
+            new_state = TrafficLightState.RED
+            
+        if new_state != self.state:
+            self.state = new_state
+            
+    def _fixed_timing_update(self):
+        cycle_pos = self.timer % 300
+        if cycle_pos < 150:
+            self.state = TrafficLightState.GREEN
+        else:
+            self.state = TrafficLightState.RED
+
+class VehicleAgent:
+    def __init__(self, x, y, agent_type=AgentType.AI_RANDOM, vehicle_id=0, color=None):
+        self.id = vehicle_id
+        self.x = float(x)
+        self.y = float(y)
+        self.angle = random.choice([0, 90, 180, 270])
+        self.speed = 0.0
+        self.max_speed = 5.0 if agent_type != AgentType.AI_AGGRESSIVE else 6.5
+        self.agent_type = agent_type
         
-        cv2.imshow("AI Driver - Registration", frame)
-        key = cv2.waitKey(30) & 0xFF
-        
-        if key == 27:  # ESC - go back to login
-            cv2.destroyWindow("AI Driver - Registration")
-            return None
-        elif key == 13:  # ENTER - attempt registration
-            if not username or not password or not confirm_password:
-                message = "All fields are required"
-                message_color = (0, 0, 255)
-            elif password != confirm_password:
-                message = "Passwords do not match"
-                message_color = (0, 0, 255)
-                confirm_password = ""
+        # Visual properties
+        if color is None:
+            if agent_type == AgentType.HUMAN:
+                self.color = (50, 50, 220)
+            elif agent_type == AgentType.AI_RANDOM:
+                self.color = (220, 50, 50)
+            elif agent_type == AgentType.AI_EFFICIENT:
+                self.color = (50, 220, 50)
             else:
-                success, msg, user_id = register_user(username, password)
-                if success:
-                    message = "Registration successful! Redirecting..."
-                    message_color = (0, 255, 0)
-                    cv2.imshow("AI Driver - Registration", frame)
-                    cv2.waitKey(1000)
-                    cv2.destroyWindow("AI Driver - Registration")
-                    return user_id
+                self.color = (220, 220, 50)
+        else:
+            self.color = color
+            
+        # Navigation
+        self.current_destination = None
+        self.destination_name = None
+        self.path = []
+        self.waypoint_idx = 0
+        self.state = "idle"
+        self.stuck_counter = 0
+        self.last_pos = (x, y)
+        
+        # Per-type driving personality
+        if agent_type == AgentType.AI_AGGRESSIVE:
+            self.max_speed          = 6.5
+            self.following_distance = 45    # tailgates
+            self.comfortable_decel  = 0.25
+            self.max_decel          = 0.7
+            self.acceleration       = 0.20
+        elif agent_type == AgentType.AI_EFFICIENT:
+            self.max_speed          = 4.2
+            self.following_distance = 85
+            self.comfortable_decel  = 0.10
+            self.max_decel          = 0.35
+            self.acceleration       = 0.09
+        elif agent_type == AgentType.AI_RANDOM:
+            self.max_speed          = random.uniform(3.5, 5.5)
+            self.following_distance = random.randint(55, 90)
+            self.comfortable_decel  = 0.13
+            self.max_decel          = 0.45
+            self.acceleration       = random.uniform(0.08, 0.15)
+        else:
+            self.max_speed          = 5.0
+            self.following_distance = 70
+            self.comfortable_decel  = 0.15
+            self.max_decel          = 0.4
+            self.acceleration       = 0.1
+        self.desired_speed = self.max_speed
+        self.lane_offset   = 18
+
+        # Traffic state
+        self.waiting_at_light = False
+        self.target_light = None
+        self.wait_time = 0
+        self.total_wait_time = 0
+        self.in_queue = False
+        self.vehicle_ahead = None
+
+        # Tire tracks
+        self.tire_tracks = []
+
+        # Park at destination before despawning
+        self.behavior_timer  = 0
+        self.park_duration   = random.randint(60, 240)   # 2–8 s at 30 fps
+        
+        # Boundaries
+        self.bounds = {'min_x': 50, 'max_x': MAP_WIDTH - 50, 'min_y': 50, 'max_y': MAP_HEIGHT - 50}
+        
+    def set_destination(self, dest_name, dest_pos, original_pos=None):
+        self.destination_name = dest_name
+        self.current_destination = dest_pos
+        self.original_goal = original_pos or dest_pos
+        self.state = "driving"
+        self.path = []
+        self.waypoint_idx = 0
+        self.speed = 0
+        self.waiting_at_light = False
+        self.in_queue = False
+        
+        # Face toward destination initially
+        dx = dest_pos[0] - self.x
+        dy = dest_pos[1] - self.y
+        if abs(dx) > abs(dy):
+            self.angle = 0 if dx > 0 else 180
+        else:
+            self.angle = 90 if dy > 0 else 270
+        
+        # Snap to lane if off road
+        if not is_on_road(self.x, self.y):
+            self._snap_to_lane()
+        
+    def update(self, world_map, traffic_lights, all_vehicles, dt=1):
+        # Enforce boundaries
+        self._enforce_boundaries()
+        
+        # Update tire tracks
+        if self.speed > 0.5:
+            self.tire_tracks.append((self.x, self.y, self.angle, 1.0))
+            if len(self.tire_tracks) > 40:
+                self.tire_tracks.pop(0)
+        self.tire_tracks = [(x, y, a, o*0.95) for x, y, a, o in self.tire_tracks if o > 0.05]
+        
+        # AI destination selection
+        if self.agent_type != AgentType.HUMAN and self.state == "idle":
+            self._ai_select_destination(world_map)
+        
+        # Main navigation
+        if self.state == "driving" and self.current_destination:
+            self._navigate_realistic(all_vehicles, traffic_lights)
+        
+        self._check_stuck()
+        
+        if self.waiting_at_light:
+            self.wait_time += dt
+            self.total_wait_time += dt
+            
+    def _enforce_boundaries(self):
+        self.x = max(self.bounds['min_x'], min(self.bounds['max_x'], self.x))
+        self.y = max(self.bounds['min_y'], min(self.bounds['max_y'], self.y))
+        
+        if not is_on_road(self.x, self.y):
+            self.x, self.y = snap_to_road(self.x, self.y)
+            
+    def _ai_select_destination(self, world_map):
+        # First-frame initialisation of idle delay counter
+        if not hasattr(self, '_idle_delay'):
+            self._idle_delay = random.randint(0, 45)
+
+        if self._idle_delay > 0:
+            self._idle_delay -= 1
+            return
+
+        if not LANDMARKS:
+            return
+
+        if self.agent_type == AgentType.AI_EFFICIENT:
+            # Pick closest landmark
+            target = min(LANDMARKS, key=lambda l:
+                math.sqrt((l["pos"][0] - self.x)**2 + (l["pos"][1] - self.y)**2))
+
+        elif self.agent_type == AgentType.AI_AGGRESSIVE:
+            dists = [math.sqrt((l["pos"][0]-self.x)**2 + (l["pos"][1]-self.y)**2)
+                     for l in LANDMARKS]
+            total = sum(dists) or 1
+            weights = [d / total for d in dists]
+            target = random.choices(LANDMARKS, weights=weights, k=1)[0]
+
+        else:   # AI_RANDOM
+            target = random.choice(LANDMARKS)
+
+        dest_pos = get_drop_off_point(target["pos"][0], target["pos"][1])
+        self.set_destination(target["name"], dest_pos, target["pos"])
+        # Reset idle delay for next arrival
+        self._idle_delay = random.randint(30, 120)
+                
+    def _navigate_realistic(self, all_vehicles, traffic_lights):
+        # Check arrival
+        if self.current_destination:
+            dist_to_dest = math.sqrt((self.x - self.current_destination[0])**2 + 
+                                     (self.y - self.current_destination[1])**2)
+            if dist_to_dest < 25:
+                self.state = "arrived"
+                self.speed = 0
+                self.waiting_at_light = False
+                return
+        
+        # Path planning
+        if not self.path or self.waypoint_idx >= len(self.path):
+            self.path = find_grid_path((self.x, self.y), self.current_destination)
+            self.waypoint_idx = 0
+
+        if not self.path:
+            self.state = "idle"
+            self.speed = 0
+            return
+            
+        if self.waypoint_idx >= len(self.path):
+            self.waypoint_idx = len(self.path) - 1
+            
+        wx, wy = self.path[self.waypoint_idx]
+        wp_dist = math.sqrt((wx - self.x)**2 + (wy - self.y)**2)
+
+        advance_radius = 20 if self.waypoint_idx == len(self.path) - 1 else 30
+        if wp_dist < advance_radius and self.waypoint_idx + 1 < len(self.path):
+            self.waypoint_idx += 1
+            wx, wy = self.path[self.waypoint_idx]
+
+        # Find vehicle ahead
+        vehicle_ahead = self._find_vehicle_ahead(all_vehicles)
+        self.vehicle_ahead = vehicle_ahead
+        
+        # Check traffic light
+        light_ahead, dist_to_light = self._check_light_ahead(traffic_lights)
+        
+        # Calculate target speed
+        target_speed = self.max_speed
+        
+        # Vehicle ahead constraint
+        if vehicle_ahead:
+            dist = math.sqrt((vehicle_ahead.x - self.x)**2 + (vehicle_ahead.y - self.y)**2)
+            safe_gap = 38   # stop before touching
+
+            if dist <= safe_gap:
+                target_speed = 0
+            elif dist < self.following_distance:
+                # Smoothly scale from 0 up to other car's speed
+                ratio = (dist - safe_gap) / (self.following_distance - safe_gap)
+                target_speed = vehicle_ahead.speed * max(0.0, min(1.0, ratio))
+            # else: target_speed stays at max_speed
+
+            self.in_queue = (dist < self.following_distance)
+        else:
+            self.in_queue = False
+            
+        # Traffic light constraint
+        self.waiting_at_light = False
+        if light_ahead and dist_to_light < 150:
+            if light_ahead.state == TrafficLightState.RED:
+                if dist_to_light < 80:
+                    target_speed = 0
+                    self.waiting_at_light = True
+                    self.target_light = light_ahead
                 else:
-                    message = msg
-                    message_color = (0, 0, 255)
-        elif key == 9:  # TAB - cycle fields
-            if active_field == "username":
-                active_field = "password"
-            elif active_field == "password":
-                active_field = "confirm"
+                    target_speed = min(target_speed, dist_to_light / 40)
+            elif light_ahead.state == TrafficLightState.YELLOW and dist_to_light < 100:
+                target_speed = min(target_speed, dist_to_light / 30)
+                
+        # Cornering speed
+        if self.waypoint_idx < len(self.path):
+            angle_to_wp = math.degrees(math.atan2(wy - self.y, wx - self.x))
+            angle_diff = abs(angle_to_wp - self.angle)
+            while angle_diff > 180:
+                angle_diff = 360 - angle_diff
+            
+            if angle_diff > 60:
+                target_speed = min(target_speed, 2.0)
+            elif angle_diff > 30:
+                target_speed = min(target_speed, 3.5)
+        
+        # Apply acceleration/deceleration
+        if target_speed < self.speed:
+            if vehicle_ahead:
+                vdist = math.sqrt((vehicle_ahead.x - self.x)**2 + (vehicle_ahead.y - self.y)**2)
+                # Scale braking force: gentle far away, maximum when very close
+                t = max(0.0, 1.0 - (vdist - 35) / 50.0)   # 0 at 85px, 1 at 35px
+                decel = self.comfortable_decel + t * (self.max_decel - self.comfortable_decel)
             else:
-                active_field = "username"
-        elif key == 8:  # Backspace
-            if active_field == "username":
-                username = username[:-1]
-            elif active_field == "password":
-                password = password[:-1]
-            else:
-                confirm_password = confirm_password[:-1]
-        elif 32 <= key < 127:  # Printable characters
-            char = chr(key)
-            if active_field == "username" and len(username) < 20:
-                if char.isalnum() or char == '_':
-                    username += char
-            elif active_field == "password" and len(password) < 20:
-                password += char
-            elif active_field == "confirm" and len(confirm_password) < 20:
-                confirm_password += char
+                # Braking for light or corner — use max_decel so we actually stop
+                decel = self.max_decel
+            self.speed = max(target_speed, self.speed - decel)
+        else:
+            self.speed = min(target_speed, self.speed + self.acceleration)
+            
+        self.speed = max(0, min(self.speed, self.max_speed))
+        
+        # Update lane offset from current heading, then steer
+        self._update_lane_direction(wx, wy)
 
-def login_screen():
-    username = ""
-    password = ""
-    active_field = "username"
-    message = ""
-    message_color = (0, 0, 255)
-    
-    while True:
-        frame = np.zeros((500, 600, 3), dtype=np.uint8)
-        frame[:] = (20, 20, 25)  # Dark blue gray background
+        # Steering toward waypoint
+        self._steer_toward(wx, wy)
         
-        # Title
-        cv2.putText(frame, "AI DRIVER LOGIN", (160, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-        
-        # Username field
-        cv2.putText(frame, "Username", (150, 130),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.rectangle(frame, (150, 140), (450, 180), (40, 40, 45), -1)
-        cv2.rectangle(frame, (150, 140), (450, 180),
-                      (0, 255, 255) if active_field=="username" else (100, 100, 100), 2)
-        cv2.putText(frame, username + ("_" if active_field=="username" else ""),
-                    (160, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        # Password field
-        cv2.putText(frame, "Password", (150, 220),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.rectangle(frame, (150, 230), (450, 270), (40, 40, 45), -1)
-        cv2.rectangle(frame, (150, 230), (450, 270),
-                      (0, 255, 255) if active_field=="password" else (100, 100, 100), 2)
-        hidden = "*" * len(password)
-        cv2.putText(frame, hidden + ("_" if active_field=="password" else ""),
-                    (160, 258), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        # Message display
-        if message:
-            cv2.putText(frame, message, (150, 310),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, message_color, 1)
-        
-        # Instructions box
-        cv2.rectangle(frame, (100, 340), (500, 420), (35, 35, 40), -1)
-        cv2.rectangle(frame, (100, 340), (500, 420), (80, 80, 80), 1)
-        
-        cv2.putText(frame, "CONTROLS:", (120, 365),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-        cv2.putText(frame, "ENTER - Login", (120, 390),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-        cv2.putText(frame, "TAB - Switch Field", (280, 390),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-        cv2.putText(frame, "R - Register New Account", (120, 410),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-        cv2.putText(frame, "ESC - Quit", (280, 410),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-        
-        cv2.imshow("AI Driver - Login", frame)
-        key = cv2.waitKey(30) & 0xFF
-        
-        if key == 27:  # ESC - quit
-            cv2.destroyAllWindows()
-            sys.exit(0)
-        elif key == ord('r') or key == ord('R'):  # R - go to registration
-            cv2.destroyWindow("AI Driver - Login")
-            user_id = registration_screen()
-            if user_id:
-                return user_id
-            # If registration was cancelled, reopen login
-            cv2.namedWindow("AI Driver - Login")
-        elif key == 13:  # ENTER - login
-            if not username or not password:
-                message = "Please enter username and password"
-                message_color = (0, 0, 255)
+        # Move forward
+        if self.speed > 0.1:
+            rad = math.radians(self.angle)
+            new_x = self.x + self.speed * math.cos(rad)
+            new_y = self.y + self.speed * math.sin(rad)
+            
+            if is_on_road(new_x, new_y):
+                self.x, self.y = new_x, new_y
             else:
-                user_id = authenticate_user(username, password)
-                if user_id:
-                    cv2.destroyWindow("AI Driver - Login")
-                    return user_id
+                # Try sliding along road
+                if is_on_road(new_x, self.y):
+                    self.x = new_x
+                elif is_on_road(self.x, new_y):
+                    self.y = new_y
                 else:
-                    message = "Invalid username or password"
-                    message_color = (0, 0, 255)
-                    password = ""
-        elif key == 9:  # TAB - switch field
-            active_field = "password" if active_field=="username" else "username"
-        elif key == 8:  # Backspace
-            if active_field == "username":
-                username = username[:-1]
-            else:
-                password = password[:-1]
-        elif 32 <= key < 127:  # Printable characters
-            char = chr(key)
-            if active_field == "username" and len(username) < 20:
-                if char.isalnum() or char == '_':
-                    username += char
-            elif active_field == "password" and len(password) < 20:
-                password += char
+                    self.speed *= 0.5
+                    self.x, self.y = snap_to_road(self.x, self.y)
 
-# Initialize database
-init_database()
+    def _find_vehicle_ahead(self, all_vehicles):
+        closest_ahead = None
+        min_dist = float('inf')
 
-# Run login/registration flow
-current_user_id = login_screen()
+        for other in all_vehicles:
+            if other.id == self.id:
+                continue
 
-# MAIN CODE
+            dx = other.x - self.x
+            dy = other.y - self.y
+            dist = math.sqrt(dx**2 + dy**2)
 
-SCREEN_WIDTH = 1200
-SIM_HEIGHT = 700
-PANEL_HEIGHT = 250
-TOTAL_HEIGHT = SIM_HEIGHT + PANEL_HEIGHT
+            if dist > 120 or dist < 1:
+                continue
 
-MAP_WIDTH = 3000
-MAP_HEIGHT = 2500
+            bearing = math.degrees(math.atan2(dy, dx))
+            b_diff  = bearing - self.angle
+            while b_diff >  180: b_diff -= 360
+            while b_diff < -180: b_diff += 360
 
-# Car state
-car_x = 600.0
-car_y = 300.0
-car_angle = 0
-car_speed = 0
-max_speed = 5.0
-car_state = "idle"
-stuck_counter = 0
-last_pos = (car_x, car_y)
+            if abs(b_diff) > 30:
+                continue   # outside forward cone
 
-# Tire tracks
-tire_tracks = []
-MAX_TRACKS = 100
+            # For moving cars also check they are going the same direction.
+            # Stopped/slow cars (speed < 0.5) are always treated as obstacles.
+            if other.speed > 0.5:
+                h_diff = other.angle - self.angle
+                while h_diff >  180: h_diff -= 360
+                while h_diff < -180: h_diff += 360
+                if abs(h_diff) > 100:
+                    continue   # oncoming or crossing traffic — ignore
 
-# Navigation
-current_destination = None
-destination_name = None
-original_goal = None
-path = []
-waypoint_idx = 0
-
-# Road grid
-ROAD_X = [200, 600, 1100, 1600, 2100, 2600]
-ROAD_Y = [200, 700, 1300, 1900, 2400]
-ROAD_HALF_WIDTH = 60
-
-# Traffic lights
-traffic_lights = []
-LIGHT_CYCLE = 300
-LIGHT_RED_DURATION = 150
-
-def init_traffic_lights():
-    lights = []
-    for i, rx in enumerate(ROAD_X[1:-1]):
-        for j, ry in enumerate(ROAD_Y[1:-1]):
-            if (i + j) % 2 == 0:
-                is_vertical_priority = (i % 2 == 0)
-                lights.append({
-                    'x': rx,
-                    'y': ry,
-                    'state': 'green',
-                    'timer': random.randint(0, LIGHT_CYCLE),
-                    'orientation': 'vertical' if is_vertical_priority else 'horizontal'
-                })
-    return lights
-
-def snap_to_road(x, y):
-    """Snap position to nearest road center"""
-    nearest_x = min(ROAD_X, key=lambda rx: abs(rx - x))
-    nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - y))
-    
-    if abs(nearest_x - x) <= abs(nearest_y - y):
-        return (nearest_x, y)
-    else:
-        return (x, nearest_y)
-
-LANDMARKS = [
-    {"name": "Your Home", "pos": (400, 400), "color": (150, 100, 50), "size": (90, 80), "type": "home"},
-    {"name": "Shell Gas", "pos": (150, 150), "color": (0, 100, 200), "size": (80, 70), "type": "gas"},
-    {"name": "Lincoln High", "pos": (850, 350), "color": (200, 200, 50), "size": (100, 90), "type": "school"},
-    {"name": "Burger King", "pos": (1300, 150), "color": (50, 150, 50), "size": (70, 70), "type": "restaurant"},
-    {"name": "Westfield Mall", "pos": (1800, 450), "color": (200, 100, 200), "size": (120, 110), "type": "mall"},
-    {"name": "Airport", "pos": (2400, 300), "color": (150, 150, 150), "size": (150, 130), "type": "airport"},
-    {"name": "General Hospital", "pos": (350, 1000), "color": (255, 255, 255), "size": (110, 100), "type": "hospital"},
-    {"name": "Police Station", "pos": (150, 1100), "color": (100, 50, 150), "size": (90, 85), "type": "police"},
-    {"name": "City Library", "pos": (900, 1000), "color": (150, 50, 150), "size": (85, 80), "type": "library"},
-    {"name": "Central Park", "pos": (1300, 1100), "color": (100, 200, 100), "size": (120, 100), "type": "park"},
-    {"name": "Chase Bank", "pos": (1800, 1000), "color": (200, 150, 50), "size": (80, 75), "type": "bank"},
-    {"name": "Pizza Hut", "pos": (2400, 1100), "color": (60, 160, 60), "size": (75, 75), "type": "restaurant"},
-    {"name": "Stadium", "pos": (400, 1600), "color": (50, 50, 150), "size": (130, 120), "type": "stadium"},
-    {"name": "Fire Station", "pos": (150, 1750), "color": (50, 50, 200), "size": (90, 85), "type": "fire"},
-    {"name": "Community College", "pos": (850, 1600), "color": (180, 180, 40), "size": (120, 110), "type": "school"},
-    {"name": "McDonald's", "pos": (1300, 1750), "color": (70, 170, 70), "size": (80, 75), "type": "restaurant"},
-    {"name": "Galleria Mall", "pos": (1850, 1600), "color": (210, 110, 210), "size": (130, 120), "type": "mall"},
-    {"name": "St. Mary's Hospital", "pos": (2400, 1750), "color": (240, 240, 240), "size": (100, 90), "type": "hospital"},
-    {"name": "Riverside Park", "pos": (400, 2200), "color": (110, 210, 110), "size": (130, 110), "type": "park"},
-    {"name": "Chevron", "pos": (150, 2300), "color": (0, 110, 210), "size": (85, 75), "type": "gas"},
-    {"name": "Wells Fargo", "pos": (900, 2200), "color": (210, 160, 60), "size": (85, 80), "type": "bank"},
-    {"name": "Taco Bell", "pos": (1350, 2300), "color": (55, 155, 55), "size": (75, 75), "type": "restaurant"},
-    {"name": "Mom's House", "pos": (1850, 2200), "color": (140, 90, 40), "size": (90, 85), "type": "home"},
-    {"name": "Friend's House", "pos": (2400, 2300), "color": (160, 110, 60), "size": (90, 85), "type": "home"},
-]
-
-traffic_lights = init_traffic_lights()
-chat_history = []
-running = True
-
-def add_chat(sender, message):
-    chat_history.append((sender, message))
-    if len(chat_history) > 8:
-        chat_history.pop(0)
-
-def find_closest_landmark(car_x, car_y, landmark_type):
-    closest = None
-    min_dist = float('inf')
-    for landmark in LANDMARKS:
-        if landmark["type"] == landmark_type or landmark_type in landmark["name"].lower():
-            dist = np.sqrt((landmark["pos"][0] - car_x)**2 + (landmark["pos"][1] - car_y)**2)
             if dist < min_dist:
                 min_dist = dist
-                closest = landmark
-    return closest, min_dist
+                closest_ahead = other
 
-def get_drop_off_point(landmark_x, landmark_y):
-    """Get drop-off point on road nearest to building"""
-    nearest_x = min(ROAD_X, key=lambda rx: abs(rx - landmark_x))
-    nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - landmark_y))
-    
-    dist_to_v = abs(nearest_x - landmark_x)
-    dist_to_h = abs(nearest_y - landmark_y)
-    
-    if dist_to_v < dist_to_h:
-        offset = 35 if landmark_x > nearest_x else -35
-        return (nearest_x + offset, landmark_y)
-    else:
-        offset = 35 if landmark_y > nearest_y else -35
-        return (landmark_x, nearest_y + offset)
+        return closest_ahead
 
-def parse_destination(text, car_x, car_y, user_id):
-    text = text.lower().strip()
-    
-    # Check for save command
-    save_match = re.match(r"save (?:this|location|place) as (.+)", text)
-    if save_match:
-        favorite_name = save_match.group(1).strip()
-        if current_destination:
-            add_favorite(user_id, favorite_name, destination_name, 
-                        current_destination[0], current_destination[1])
-            return f"Saved as '{favorite_name}'", None, None
+    def _check_light_ahead(self, traffic_lights):
+        best_light = None
+        best_dist  = float('inf')
+
+        for light in traffic_lights:
+            dx = light.x - self.x
+            dy = light.y - self.y
+            dist = math.sqrt(dx**2 + dy**2)
+
+            if dist > 180 or dist < 20:
+                continue
+
+            angle_to_light = math.degrees(math.atan2(dy, dx))
+            diff = angle_to_light - self.angle
+            while diff >  180: diff -= 360
+            while diff < -180: diff += 360
+
+            if abs(diff) < 30 and dist < best_dist:
+                best_dist  = dist
+                best_light = light
+
+        return best_light, best_dist
+
+    def _steer_toward(self, wx, wy):
+        dx = wx - self.x
+        dy = wy - self.y
+        if abs(dx) < 1 and abs(dy) < 1:
+            return
+
+        target_angle = math.degrees(math.atan2(dy, dx))
+
+        steer = target_angle - self.angle
+        while steer > 180:  steer -= 360
+        while steer < -180: steer += 360
+
+        max_turn = 5.0
+        self.angle += max(-max_turn, min(max_turn, steer * 0.4))
+        while self.angle >= 360: self.angle -= 360
+        while self.angle < 0:    self.angle += 360
+
+    def _get_lane_target(self, wx, wy):
+        LANE_W = 18
+        heading_rad = math.radians(self.angle)
+        ch = math.cos(heading_rad)
+        sh = math.sin(heading_rad)
+        if abs(ch) >= abs(sh):
+            road_y = min(ROAD_Y, key=lambda ry: abs(ry - self.y))
+            return wx, road_y + (LANE_W if ch > 0 else -LANE_W)
         else:
-            return "No destination to save", None, None
-    
-    # Check for favorite commands
-    favorite_commands = ["home", "work", "office", "gym", "school"]
-    for cmd in favorite_commands:
-        if text in [cmd, f"my {cmd}", f"go to {cmd}", f"take me to {cmd}", 
-                   f"drive to {cmd}", f"navigate to {cmd}"]:
-            fav = get_favorite(user_id, cmd)
-            if fav:
-                return fav["landmark_name"], (fav["x"], fav["y"]), (fav["x"], fav["y"])
-            else:
-                return f"No {cmd} saved", None, None
-    
-    # Regular parsing
-    text = re.sub(r"^(take me to|drive to|go to|navigate to|i want to go to|let's go to|nearest|closest)\s*", "", text)
-    text = re.sub(r"^(the|a|an)\s+", "", text)
-    text = text.strip(" .!?")
-    
-    type_keywords = {
-        "gas": "gas", "station": "gas", "fuel": "gas", "petrol": "gas",
-        "school": "school", "college": "school", "university": "school",
-        "restaurant": "restaurant", "food": "restaurant", "eat": "restaurant", 
-        "hungry": "restaurant", "burger": "restaurant", "pizza": "restaurant",
-        "home": "home", "house": "home",
-        "mall": "mall", "shopping": "mall", "shop": "mall",
-        "hospital": "hospital", "doctor": "hospital", "medical": "hospital",
-        "park": "park",
-        "bank": "bank", "money": "bank", "atm": "bank",
-        "police": "police", "cop": "police",
-        "fire": "fire",
-        "library": "library", "book": "library",
-        "airport": "airport", "fly": "airport", "plane": "airport",
-        "stadium": "stadium", "football": "stadium", "game": "stadium",
-    }
-    
-    for landmark in LANDMARKS:
-        if landmark["name"].lower() in text or text in landmark["name"].lower():
-            lx, ly = landmark["pos"]
-            road_pos = get_drop_off_point(lx, ly)
-            return landmark["name"], road_pos, (lx, ly)
-    
-    for keyword, ltype in type_keywords.items():
-        if keyword in text:
-            closest, dist = find_closest_landmark(car_x, car_y, ltype)
-            if closest:
-                lx, ly = closest["pos"]
-                road_pos = get_drop_off_point(lx, ly)
-                return closest["name"], road_pos, (lx, ly)
-    
-    return None, None, None
+            road_x = min(ROAD_X, key=lambda rx: abs(rx - self.x))
+            return road_x + (LANE_W if sh > 0 else -LANE_W), wy
 
-def find_grid_path(start, goal):
-    sx, sy = start
-    gx, gy = goal
-    
-    path = []
-    path.append((sx, sy))
-    
-    start_ix = min(ROAD_X, key=lambda rx: abs(rx - sx))
-    start_iy = min(ROAD_Y, key=lambda ry: abs(ry - sy))
-    goal_ix = min(ROAD_X, key=lambda rx: abs(rx - gx))
-    goal_iy = min(ROAD_Y, key=lambda ry: abs(ry - gy))
-    
-    if abs(sx - start_ix) > 5 or abs(sy - start_iy) > 5:
-        path.append((start_ix, start_iy))
-    
-    current_x, current_y = start_ix, start_iy
-    
-    dist_h_first = abs(goal_ix - current_x) + abs(goal_iy - start_iy)
-    dist_v_first = abs(goal_iy - current_y) + abs(goal_ix - start_ix)
-    
-    if dist_h_first <= dist_v_first:
-        if goal_ix > current_x:
-            for x in ROAD_X:
-                if x > current_x and x <= goal_ix:
-                    path.append((x, current_y))
-        elif goal_ix < current_x:
-            for x in reversed(ROAD_X):
-                if x < current_x and x >= goal_ix:
-                    path.append((x, current_y))
-        current_x = goal_ix
-        
-        if goal_iy > current_y:
-            for y in ROAD_Y:
-                if y > current_y and y <= goal_iy:
-                    path.append((current_x, y))
-        elif goal_iy < current_y:
-            for y in reversed(ROAD_Y):
-                if y < current_y and y >= goal_iy:
-                    path.append((current_x, y))
-        current_y = goal_iy
+    def _update_lane_direction(self, wx, wy):
+        LANE_W = 18
+        heading_rad = math.radians(self.angle)
+        ch = math.cos(heading_rad)
+        sh = math.sin(heading_rad)
+        self.lane_offset = LANE_W if (abs(ch) >= abs(sh) and ch > 0) or \
+                                     (abs(sh) > abs(ch) and sh > 0) else -LANE_W
+            
+    def _check_stuck(self):
+        current_pos = (self.x, self.y)
+        moved = math.sqrt((current_pos[0] - self.last_pos[0])**2 +
+                          (current_pos[1] - self.last_pos[1])**2)
+
+        # Don't count as stuck while stopped at a red light
+        if moved < 0.1 and self.state == "driving" and not self.waiting_at_light:
+            self.stuck_counter += 1
+            if self.stuck_counter > 120:
+                if self.agent_type != AgentType.HUMAN:
+                    # Teleport to a clear intersection and pick a fresh destination
+                    self._unstick()
+                else:
+                    self.x, self.y = snap_to_road(self.x, self.y)
+                self.stuck_counter = 0
+        else:
+            self.stuck_counter = 0
+
+        self.last_pos = current_pos
+
+    def _unstick(self):
+        """Teleport this AI car to a random clear intersection and restart."""
+        for _ in range(20):
+            rx = random.choice(ROAD_X)
+            ry = random.choice(ROAD_Y)
+            if not any(v.id != self.id and
+                       math.sqrt((v.x-rx)**2 + (v.y-ry)**2) < 80
+                       for v in _all_vehicles_ref):
+                self.x, self.y = float(rx), float(ry)
+                break
+        else:
+            self.x = float(random.choice(ROAD_X))
+            self.y = float(random.choice(ROAD_Y))
+        self.speed = 0
+        self.path  = []
+        self.waypoint_idx = 0
+        self.state = "idle"
+        self._idle_delay = random.randint(5, 20)
+
+    def _snap_to_lane(self):
+        """Snap car to the correct lane on whichever road it's currently on."""
+        self._update_lane_direction(self.x, self.y)
+        nearest_x = min(ROAD_X, key=lambda rx: abs(rx - self.x))
+        nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - self.y))
+        if abs(self.x - nearest_x) <= abs(self.y - nearest_y):
+            self.x = nearest_x + self.lane_offset
+        else:
+            self.y = nearest_y + self.lane_offset
+
+def draw_vehicle(img, vehicle, car_x, car_y, is_player=False):
+    if is_player:
+        scr_x = SCREEN_WIDTH // 2
+        scr_y = SIM_HEIGHT // 2
     else:
-        if goal_iy > current_y:
-            for y in ROAD_Y:
-                if y > current_y and y <= goal_iy:
-                    path.append((current_x, y))
-        elif goal_iy < current_y:
-            for y in reversed(ROAD_Y):
-                if y < current_y and y >= goal_iy:
-                    path.append((current_x, y))
-        current_y = goal_iy
+        scr_x = SCREEN_WIDTH//2 + int(vehicle.x - car_x)
+        scr_y = SIM_HEIGHT//2 + int(vehicle.y - car_y)
+    
+    if not (0 < scr_x < SCREEN_WIDTH and 0 < scr_y < SIM_HEIGHT):
+        return
         
-        if goal_ix > current_x:
-            for x in ROAD_X:
-                if x > current_x and x <= goal_ix:
-                    path.append((x, current_y))
-        elif goal_ix < current_x:
-            for x in reversed(ROAD_X):
-                if x < current_x and x >= goal_ix:
-                    path.append((x, current_y))
-        current_x = goal_ix
+    sprite = create_car_sprite(36, 22, vehicle.color)
+    rotated, _ = rotate_sprite(sprite, vehicle.angle)
+    draw_sprite_on_image(img, rotated, scr_x, scr_y, shadow=True)
     
-    if abs(current_x - gx) > 5 or abs(current_y - gy) > 5:
-        path.append((gx, gy))
+    if vehicle.agent_type != AgentType.HUMAN:
+        cv2.putText(img, f"{vehicle.id}", (scr_x-5, scr_y-20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
     
-    filtered = []
-    for p in path:
-        if not filtered or abs(p[0] - filtered[-1][0]) > 2 or abs(p[1] - filtered[-1][1]) > 2:
-            filtered.append(p)
-    
-    return filtered
+    if vehicle.waiting_at_light:
+        cv2.circle(img, (scr_x, scr_y-30), 4, (0,0,255), -1)
+    elif vehicle.in_queue:
+        cv2.circle(img, (scr_x-8, scr_y-30), 3, (0,255,255), -1)
+        
+    if vehicle.vehicle_ahead:
+        ahead_x = SCREEN_WIDTH//2 + int(vehicle.vehicle_ahead.x - car_x)
+        ahead_y = SIM_HEIGHT//2 + int(vehicle.vehicle_ahead.y - car_y)
+        if 0 < ahead_x < SCREEN_WIDTH and 0 < ahead_y < SIM_HEIGHT:
+            cv2.line(img, (scr_x, scr_y), (ahead_x, ahead_y), (255,255,0), 1)
 
-def create_car_sprite(width=40, height=24):
+def create_car_sprite(width=40, height=24, body_color=None):
     car_img = np.zeros((height, width, 4), dtype=np.uint8)
-    body_color = (50, 50, 220, 255)
+    
+    if body_color is None:
+        body_color = (50, 50, 220, 255)
+    else:
+        body_color = (*body_color, 255)
+        
     window_color = (200, 200, 255, 255)
     tire_color = (30, 30, 30, 255)
     light_color = (0, 255, 255, 255)
@@ -821,52 +730,126 @@ def create_car_sprite(width=40, height=24):
     
     return car_img
 
-def create_building_icon(building_type, width=60, height=50):
-    icon = np.zeros((height, width, 4), dtype=np.uint8)
+def snap_to_road(x, y):
+    nearest_x = min(ROAD_X, key=lambda rx: abs(rx - x))
+    nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - y))
     
-    colors = {
-        "gas": ((0, 100, 200, 255), (255, 255, 255, 255)),
-        "school": ((200, 200, 50, 255), (50, 50, 50, 255)),
-        "home": ((150, 100, 50, 255), (100, 50, 0, 255)),
-        "park": ((100, 200, 100, 255), (0, 100, 0, 255)),
-        "restaurant": ((50, 150, 50, 255), (255, 200, 0, 255)),
-        "mall": ((200, 100, 200, 255), (100, 50, 100, 255)),
-        "hospital": ((255, 255, 255, 255), (0, 0, 255, 255)),
-        "bank": ((200, 150, 50, 255), (255, 255, 0, 255)),
-        "police": ((100, 50, 150, 255), (255, 255, 255, 255)),
-        "fire": ((50, 50, 200, 255), (255, 255, 255, 255)),
-        "library": ((150, 50, 150, 255), (200, 200, 255, 255)),
-        "airport": ((150, 150, 150, 255), (100, 100, 100, 255)),
-        "stadium": ((50, 50, 150, 255), (200, 200, 200, 255)),
-    }
-    
-    base_color, detail_color = colors.get(building_type, ((150, 150, 150, 255), (100, 100, 100, 255)))
-    
-    cv2.rectangle(icon, (5, 10), (width-5, height-5), base_color, -1)
-    cv2.rectangle(icon, (5, 10), (width-5, height-5), (30, 30, 30, 255), 2)
-    cv2.rectangle(icon, (3, 5), (width-3, 12), (40, 40, 40, 255), -1)
-    
-    if building_type == "gas":
-        cv2.rectangle(icon, (width//2-8, 18), (width//2+8, 38), detail_color, -1)
-        cv2.line(icon, (width//2, 18), (width//2, 12), detail_color, 3)
-    elif building_type == "hospital":
-        cx, cy = width//2, height//2 + 3
-        cv2.rectangle(icon, (cx-3, cy-8), (cx+3, cy+8), detail_color, -1)
-        cv2.rectangle(icon, (cx-8, cy-3), (cx+8, cy+3), detail_color, -1)
-    elif building_type == "school":
-        cv2.line(icon, (width//2, 15), (width//2, 35), detail_color, 2)
-        cv2.rectangle(icon, (width//2, 15), (width//2+10, 22), detail_color, -1)
-    elif building_type == "home":
-        pts = np.array([[5, 10], [width//2, 2], [width-5, 10]], np.int32)
-        cv2.fillPoly(icon, [pts], detail_color)
-    elif building_type == "restaurant":
-        cv2.line(icon, (width//2-5, 20), (width//2-5, 35), detail_color, 2)
-        cv2.line(icon, (width//2+5, 20), (width//2+5, 35), detail_color, 2)
-    elif building_type == "park":
-        cv2.circle(icon, (width//2, 25), 8, detail_color, -1)
-        cv2.rectangle(icon, (width//2-2, 33), (width//2+2, 40), (100, 50, 0, 255), -1)
-    
-    return icon
+    if abs(nearest_x - x) <= abs(nearest_y - y):
+        return (nearest_x, y)
+    else:
+        return (x, nearest_y)
+
+def is_on_road(x, y):
+    for rx in ROAD_X:
+        if abs(x - rx) <= ROAD_HALF_WIDTH:
+            return True
+    for ry in ROAD_Y:
+        if abs(y - ry) <= ROAD_HALF_WIDTH:
+            return True
+    return False
+
+def get_drop_off_point(landmark_x, landmark_y):
+    # Distance to each candidate road line
+    best_v_road = min(ROAD_X, key=lambda rx: abs(rx - landmark_x))
+    best_h_road = min(ROAD_Y, key=lambda ry: abs(ry - landmark_y))
+
+    dist_to_v = abs(best_v_road - landmark_x)
+    dist_to_h = abs(best_h_road - landmark_y)
+
+    if dist_to_v <= dist_to_h:
+        # Closest road is vertical — park on it, align Y with the landmark
+        side_offset = 20 if landmark_x > best_v_road else -20
+        road_x = best_v_road + side_offset
+        # Clamp road_y to stay within the map; no snapping to intersections
+        road_y = max(50, min(MAP_HEIGHT - 50, landmark_y))
+        return (road_x, road_y)
+    else:
+        # Closest road is horizontal
+        side_offset = 20 if landmark_y > best_h_road else -20
+        road_y = best_h_road + side_offset
+        road_x = max(50, min(MAP_WIDTH - 50, landmark_x))
+        return (road_x, road_y)
+def find_grid_path(start, goal):
+    LANE_W = 18
+    sx, sy = start
+    gx, gy = goal
+
+    # Nearest road grid lines for start and goal
+    start_rx = min(ROAD_X, key=lambda rx: abs(rx - sx))
+    start_ry = min(ROAD_Y, key=lambda ry: abs(ry - sy))
+    goal_rx  = min(ROAD_X, key=lambda rx: abs(rx - gx))
+    goal_ry  = min(ROAD_Y, key=lambda ry: abs(ry - gy))
+
+    raw = []  
+
+    # Start at current position
+    raw.append((sx, sy, 0, 0))
+
+    # Enter the road grid: slide to nearest intersection
+    cur_x, cur_y = start_rx, start_ry
+
+    # Decide horizontal-first or vertical-first
+    h_dist = abs(goal_rx - start_rx)
+    v_dist = abs(goal_ry - start_ry)
+
+    if h_dist >= v_dist:
+        # Horizontal leg first
+        dx_sign = 1 if goal_rx >= cur_x else -1
+        xs = sorted([x for x in ROAD_X
+                     if min(cur_x, goal_rx) <= x <= max(cur_x, goal_rx)])
+        if dx_sign < 0: xs = xs[::-1]
+        for x in xs:
+            raw.append((x, cur_y, dx_sign, 0))
+        cur_x = goal_rx
+
+        # Vertical leg
+        dy_sign = 1 if goal_ry >= cur_y else -1
+        ys = sorted([y for y in ROAD_Y
+                     if min(cur_y, goal_ry) <= y <= max(cur_y, goal_ry)])
+        if dy_sign < 0: ys = ys[::-1]
+        for y in ys:
+            raw.append((cur_x, y, 0, dy_sign))
+        cur_y = goal_ry
+    else:
+        # Vertical leg
+        dy_sign = 1 if goal_ry >= cur_y else -1
+        ys = sorted([y for y in ROAD_Y
+                     if min(cur_y, goal_ry) <= y <= max(cur_y, goal_ry)])
+        if dy_sign < 0: ys = ys[::-1]
+        for y in ys:
+            raw.append((cur_x, y, 0, dy_sign))
+        cur_y = goal_ry
+
+        # Horizontal leg
+        dx_sign = 1 if goal_rx >= cur_x else -1
+        xs = sorted([x for x in ROAD_X
+                     if min(cur_x, goal_rx) <= x <= max(cur_x, goal_rx)])
+        if dx_sign < 0: xs = xs[::-1]
+        for x in xs:
+            raw.append((x, cur_y, dx_sign, 0))
+        cur_x = goal_rx
+
+    # Final destination
+    raw.append((gx, gy, 0, 0))
+
+    path = []
+    for x, y, dxs, dys in raw:
+        if dxs != 0:
+            # Horizontal travel: offset Y
+            path.append((x, y + LANE_W * dxs))
+        elif dys != 0:
+            # Vertical travel: offset X
+            path.append((x + LANE_W * dys, y))
+        else:
+            # Start or end
+            path.append((x, y))
+
+    filtered = []
+    for p in path:
+        if not filtered or abs(p[0]-filtered[-1][0]) > 2 or abs(p[1]-filtered[-1][1]) > 2:
+            filtered.append(p)
+
+    return filtered
 
 def rotate_sprite(sprite, angle):
     h, w = sprite.shape[:2]
@@ -929,87 +912,371 @@ def draw_sprite_on_image(background, sprite, x, y, shadow=False):
             (1 - alpha) * background[y1:y2, x1:x2, c]
         )
 
-def draw_tire_tracks(img, tracks, car_x, car_y):
-    for tx, ty, angle, opacity in tracks:
-        scr_x = SCREEN_WIDTH//2 + int(tx - car_x)
-        scr_y = SIM_HEIGHT//2 + int(ty - car_y)
-        
-        if 0 < scr_x < SCREEN_WIDTH and 0 < scr_y < SIM_HEIGHT:
-            rad = np.radians(angle)
-            x1 = int(scr_x - 6 * np.cos(rad))
-            y1 = int(scr_y - 6 * np.sin(rad))
-            x2 = int(scr_x + 6 * np.cos(rad))
-            y2 = int(scr_y + 6 * np.sin(rad))
-            
-            color = (30, 30, 30)
-            cv2.line(img, (x1, y1), (x2, y2), color, 2)
+def create_building_icon(building_type, width=60, height=50):
+    icon = np.zeros((height, width, 4), dtype=np.uint8)
+    
+    colors = {
+        "gas": ((0, 100, 200, 255), (255, 255, 255, 255)),
+        "school": ((200, 200, 50, 255), (50, 50, 50, 255)),
+        "home": ((150, 100, 50, 255), (100, 50, 0, 255)),
+        "park": ((100, 200, 100, 255), (0, 100, 0, 255)),
+        "restaurant": ((50, 150, 50, 255), (255, 200, 0, 255)),
+        "mall": ((200, 100, 200, 255), (100, 50, 100, 255)),
+        "hospital": ((255, 255, 255, 255), (0, 0, 255, 255)),
+        "bank": ((200, 150, 50, 255), (255, 255, 0, 255)),
+        "police": ((100, 50, 150, 255), (255, 255, 255, 255)),
+        "fire": ((50, 50, 200, 255), (255, 255, 255, 255)),
+        "library": ((150, 50, 150, 255), (200, 200, 255, 255)),
+        "airport": ((150, 150, 150, 255), (100, 100, 100, 255)),
+        "stadium": ((50, 50, 150, 255), (200, 200, 200, 255)),
+    }
+    
+    base_color, detail_color = colors.get(building_type, ((150, 150, 150, 255), (100, 100, 100, 255)))
+    
+    cv2.rectangle(icon, (5, 10), (width-5, height-5), base_color, -1)
+    cv2.rectangle(icon, (5, 10), (width-5, height-5), (30, 30, 30, 255), 2)
+    cv2.rectangle(icon, (3, 5), (width-3, 12), (40, 40, 40, 255), -1)
+    
+    if building_type == "gas":
+        cv2.rectangle(icon, (width//2-8, 18), (width//2+8, 38), detail_color, -1)
+        cv2.line(icon, (width//2, 18), (width//2, 12), detail_color, 3)
+    elif building_type == "hospital":
+        cx, cy = width//2, height//2 + 3
+        cv2.rectangle(icon, (cx-3, cy-8), (cx+3, cy+8), detail_color, -1)
+        cv2.rectangle(icon, (cx-8, cy-3), (cx+8, cy+3), detail_color, -1)
+    elif building_type == "school":
+        cv2.line(icon, (width//2, 15), (width//2, 35), detail_color, 2)
+        cv2.rectangle(icon, (width//2, 15), (width//2+10, 22), detail_color, -1)
+    elif building_type == "home":
+        pts = np.array([[5, 10], [width//2, 2], [width-5, 10]], np.int32)
+        cv2.fillPoly(icon, [pts], detail_color)
+    elif building_type == "restaurant":
+        cv2.line(icon, (width//2-5, 20), (width//2-5, 35), detail_color, 2)
+        cv2.line(icon, (width//2+5, 20), (width//2+5, 35), detail_color, 2)
+    elif building_type == "park":
+        cv2.circle(icon, (width//2, 25), 8, detail_color, -1)
+        cv2.rectangle(icon, (width//2-2, 33), (width//2+2, 40), (100, 50, 0, 255), -1)
+    
+    return icon
 
-def update_traffic_lights():
-    for light in traffic_lights:
-        light['timer'] += 1
-        if light['timer'] >= LIGHT_CYCLE:
-            light['timer'] = 0
-        
-        if light['timer'] < LIGHT_RED_DURATION:
-            light['state'] = 'red'
-        else:
-            light['state'] = 'green'
-
-def draw_traffic_lights(img, car_x, car_y):
-    for light in traffic_lights:
-        scr_x = SCREEN_WIDTH//2 + int(light['x'] - car_x)
-        scr_y = SIM_HEIGHT//2 + int(light['y'] - car_y)
-        
-        if 0 < scr_x < SCREEN_WIDTH and 0 < scr_y < SIM_HEIGHT:
-            cv2.line(img, (scr_x, scr_y), (scr_x, scr_y - 30), (80, 80, 80), 3)
-            cv2.rectangle(img, (scr_x-8, scr_y-45), (scr_x+8, scr_y-25), (40, 40, 40), -1)
-            
-            if light['state'] == 'red':
-                color = (0, 0, 255)
+def parse_destination(text, car_x, car_y, user_id):
+    """
+    FIX 5: Save command now returns a proper 3-tuple so the caller never crashes.
+    Returns (display_message, road_pos_or_None, original_pos_or_None)
+    """
+    text = text.lower().strip()
+    
+    save_match = re.match(r"save (?:this|location|place) as (.+)", text)
+    if save_match:
+        return "Save command processed", None, None
+    
+    favorite_commands = ["home", "work", "office", "gym", "school"]
+    for cmd in favorite_commands:
+        if text in [cmd, f"my {cmd}", f"go to {cmd}", f"take me to {cmd}", 
+                   f"drive to {cmd}", f"navigate to {cmd}"]:
+            fav = get_favorite(user_id, cmd)
+            if fav:
+                return fav["landmark_name"], (fav["x"], fav["y"]), (fav["x"], fav["y"])
             else:
-                color = (0, 255, 0)
+                return f"No {cmd} saved yet", None, None
+    
+    text = re.sub(r"^(take me to|drive to|go to|navigate to|i want to go to|let's go to|nearest|closest)\s*", "", text)
+    text = re.sub(r"^(the|a|an)\s+", "", text)
+    text = text.strip(" .!?")
+    
+    type_keywords = {
+        "gas": "gas", "station": "gas", "fuel": "gas", "petrol": "gas",
+        "school": "school", "college": "school", "university": "school",
+        "restaurant": "restaurant", "food": "restaurant", "eat": "restaurant", 
+        "hungry": "restaurant", "burger": "restaurant", "pizza": "restaurant",
+        "home": "home", "house": "home",
+        "mall": "mall", "shopping": "mall", "shop": "mall",
+        "hospital": "hospital", "doctor": "hospital", "medical": "hospital",
+        "park": "park",
+        "bank": "bank", "money": "bank", "atm": "bank",
+        "police": "police", "cop": "police",
+        "fire": "fire",
+        "library": "library", "book": "library",
+        "airport": "airport", "fly": "airport", "plane": "airport",
+        "stadium": "stadium", "football": "stadium", "game": "stadium",
+    }
+    
+    # Exact or substring name match
+    for landmark in LANDMARKS:
+        if landmark["name"].lower() in text or text in landmark["name"].lower():
+            lx, ly = landmark["pos"]
+            road_pos = get_drop_off_point(lx, ly)
+            return landmark["name"], road_pos, (lx, ly)
+    
+    # Keyword match  find closest of that type
+    for keyword, ltype in type_keywords.items():
+        if keyword in text:
+            closest, dist = find_closest_landmark(car_x, car_y, ltype)
+            if closest:
+                lx, ly = closest["pos"]
+                road_pos = get_drop_off_point(lx, ly)
+                return closest["name"], road_pos, (lx, ly)
+    
+    return None, None, None
+
+def find_closest_landmark(car_x, car_y, landmark_type):
+    closest = None
+    min_dist = float('inf')
+    for landmark in LANDMARKS:
+        if landmark["type"] == landmark_type or landmark_type in landmark["name"].lower():
+            dist = math.sqrt((landmark["pos"][0] - car_x)**2 + (landmark["pos"][1] - car_y)**2)
+            if dist < min_dist:
+                min_dist = dist
+                closest = landmark
+    return closest, min_dist
+
+def registration_screen():
+    username = ""
+    password = ""
+    confirm_password = ""
+    active_field = "username"
+    message = ""
+    message_color = (0, 0, 255)
+    
+    while True:
+        frame = np.zeros((500, 600, 3), dtype=np.uint8)
+        frame[:] = (20, 20, 25)
+        
+        cv2.putText(frame, "CREATE ACCOUNT", (140, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+        cv2.putText(frame, "Join AI Driver today", (200, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        
+        y_offset = 140
+        
+        cv2.putText(frame, "Username", (150, y_offset-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
+                      (0, 255, 255) if active_field=="username" else (100, 100, 100), 2)
+        cv2.putText(frame, username + ("_" if active_field=="username" else ""),
+                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        y_offset += 70
+        
+        cv2.putText(frame, "Password", (150, y_offset-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
+                      (0, 255, 255) if active_field=="password" else (100, 100, 100), 2)
+        hidden = "*" * len(password)
+        cv2.putText(frame, hidden + ("_" if active_field=="password" else ""),
+                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        y_offset += 70
+        
+        cv2.putText(frame, "Confirm Password", (150, y_offset-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40), (40, 40, 45), -1)
+        cv2.rectangle(frame, (150, y_offset), (450, y_offset+40),
+                      (0, 255, 255) if active_field=="confirm" else (100, 100, 100), 2)
+        hidden_conf = "*" * len(confirm_password)
+        cv2.putText(frame, hidden_conf + ("_" if active_field=="confirm" else ""),
+                    (160, y_offset+28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        if message:
+            y_msg = 380
+            words = message.split()
+            lines = []
+            current_line = ""
+            for word in words:
+                if len(current_line + word) < 40:
+                    current_line += word + " "
+                else:
+                    lines.append(current_line.strip())
+                    current_line = word + " "
+            if current_line:
+                lines.append(current_line.strip())
             
-            cv2.circle(img, (scr_x, scr_y-35), 5, color, -1)
+            for i, line in enumerate(lines):
+                cv2.putText(frame, line, (150, y_msg + i*20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, message_color, 1)
+        
+        cv2.putText(frame, "TAB: Next Field | ENTER: Register | ESC: Back to Login",
+                    (100, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+        
+        cv2.imshow("AI Driver - Registration", frame)
+        key = cv2.waitKey(30) & 0xFF
+        
+        if key == 27:
+            cv2.destroyWindow("AI Driver - Registration")
+            return None
+        elif key == 13:
+            if not username or not password or not confirm_password:
+                message = "All fields are required"
+                message_color = (0, 0, 255)
+            elif password != confirm_password:
+                message = "Passwords do not match"
+                message_color = (0, 0, 255)
+                confirm_password = ""
+            else:
+                success, msg, user_id = register_user(username, password)
+                if success:
+                    message = "Registration successful! Redirecting..."
+                    message_color = (0, 255, 0)
+                    cv2.imshow("AI Driver - Registration", frame)
+                    cv2.waitKey(1000)
+                    cv2.destroyWindow("AI Driver - Registration")
+                    return user_id
+                else:
+                    message = msg
+                    message_color = (0, 0, 255)
+        elif key == 9:
+            if active_field == "username":
+                active_field = "password"
+            elif active_field == "password":
+                active_field = "confirm"
+            else:
+                active_field = "username"
+        elif key == 8:
+            if active_field == "username":
+                username = username[:-1]
+            elif active_field == "password":
+                password = password[:-1]
+            else:
+                confirm_password = confirm_password[:-1]
+        elif 32 <= key < 127:
+            char = chr(key)
+            if active_field == "username" and len(username) < 20:
+                if char.isalnum() or char == '_':
+                    username += char
+            elif active_field == "password" and len(password) < 20:
+                password += char
+            elif active_field == "confirm" and len(confirm_password) < 20:
+                confirm_password += char
+
+def login_screen():
+    username = ""
+    password = ""
+    active_field = "username"
+    message = ""
+    message_color = (0, 0, 255)
     
-    return img
+    while True:
+        frame = np.zeros((500, 600, 3), dtype=np.uint8)
+        frame[:] = (20, 20, 25)
+        
+        cv2.putText(frame, "AI DRIVER LOGIN", (160, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+        
+        cv2.putText(frame, "Username", (150, 130),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.rectangle(frame, (150, 140), (450, 180), (40, 40, 45), -1)
+        cv2.rectangle(frame, (150, 140), (450, 180),
+                      (0, 255, 255) if active_field=="username" else (100, 100, 100), 2)
+        cv2.putText(frame, username + ("_" if active_field=="username" else ""),
+                    (160, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        cv2.putText(frame, "Password", (150, 220),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.rectangle(frame, (150, 230), (450, 270), (40, 40, 45), -1)
+        cv2.rectangle(frame, (150, 230), (450, 270),
+                      (0, 255, 255) if active_field=="password" else (100, 100, 100), 2)
+        hidden = "*" * len(password)
+        cv2.putText(frame, hidden + ("_" if active_field=="password" else ""),
+                    (160, 258), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        if message:
+            cv2.putText(frame, message, (150, 310),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, message_color, 1)
+        
+        cv2.rectangle(frame, (100, 340), (500, 420), (35, 35, 40), -1)
+        cv2.rectangle(frame, (100, 340), (500, 420), (80, 80, 80), 1)
+        
+        cv2.putText(frame, "CONTROLS:", (120, 365),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        cv2.putText(frame, "ENTER - Login", (120, 390),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        cv2.putText(frame, "TAB - Switch Field", (280, 390),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        cv2.putText(frame, "R - Register New Account", (120, 410),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        cv2.putText(frame, "ESC - Quit", (280, 410),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        
+        cv2.imshow("AI Driver - Login", frame)
+        key = cv2.waitKey(30) & 0xFF
+        
+        if key == 27:
+            cv2.destroyAllWindows()
+            sys.exit(0)
+        elif key == ord('r') or key == ord('R'):
+            cv2.destroyWindow("AI Driver - Login")
+            user_id = registration_screen()
+            if user_id:
+                return user_id
+            cv2.namedWindow("AI Driver - Login")
+        elif key == 13:
+            if not username or not password:
+                message = "Please enter username and password"
+                message_color = (0, 0, 255)
+            else:
+                user_id = authenticate_user(username, password)
+                if user_id:
+                    cv2.destroyWindow("AI Driver - Login")
+                    return user_id
+                else:
+                    message = "Invalid username or password"
+                    message_color = (0, 0, 255)
+                    password = ""
+        elif key == 9:
+            active_field = "password" if active_field=="username" else "username"
+        elif key == 8:
+            if active_field == "username":
+                username = username[:-1]
+            else:
+                password = password[:-1]
+        elif 32 <= key < 127:
+            char = chr(key)
+            if active_field == "username" and len(username) < 20:
+                if char.isalnum() or char == '_':
+                    username += char
+            elif active_field == "password" and len(password) < 20:
+                password += char
 
-def check_traffic_light_stop(car_x, car_y, car_angle):
-    for light in traffic_lights:
-        if light['state'] != 'red':
-            continue
-        
-        dx = light['x'] - car_x
-        dy = light['y'] - car_y
-        dist = np.sqrt(dx**2 + dy**2)
-        
-        if dist > 200 or dist < 30:
-            continue
-        
-        angle_to_light = np.degrees(np.arctan2(dy, dx))
-        angle_diff = abs(angle_to_light - car_angle)
-        while angle_diff > 180:
-            angle_diff = 360 - angle_diff
-        
-        if angle_diff < 45:
-            car_orientation = 'vertical' if abs(np.cos(np.radians(car_angle))) < 0.5 else 'horizontal'
-            if car_orientation != light['orientation']:
-                return True, dist
-    
-    return False, float('inf')
+# ==================== MAIN CONFIGURATION ====================
 
-def is_on_road(x, y):
-    for rx in ROAD_X:
-        if abs(x - rx) <= ROAD_HALF_WIDTH:
-            return True
-    for ry in ROAD_Y:
-        if abs(y - ry) <= ROAD_HALF_WIDTH:
-            return True
-    return False
+SCREEN_WIDTH = 1200
+SIM_HEIGHT = 700
+PANEL_HEIGHT = 250
+TOTAL_HEIGHT = SIM_HEIGHT + PANEL_HEIGHT
 
-car_sprite = create_car_sprite(40, 24)
-building_icons = {}
-for ltype in set(l["type"] for l in LANDMARKS):
-    building_icons[ltype] = create_building_icon(ltype, 60, 50)
+MAP_WIDTH = 3000
+MAP_HEIGHT = 2500
+
+ROAD_X = [200, 600, 1100, 1600, 2100, 2600]
+ROAD_Y = [200, 700, 1300, 1900, 2400]
+ROAD_HALF_WIDTH = 60
+
+LANDMARKS = [
+    {"name": "Your Home", "pos": (400, 400), "color": (150, 100, 50), "size": (90, 80), "type": "home"},
+    {"name": "Shell Gas", "pos": (150, 150), "color": (0, 100, 200), "size": (80, 70), "type": "gas"},
+    {"name": "Lincoln High", "pos": (850, 350), "color": (200, 200, 50), "size": (100, 90), "type": "school"},
+    {"name": "Burger King", "pos": (1300, 150), "color": (50, 150, 50), "size": (70, 70), "type": "restaurant"},
+    {"name": "Westfield Mall", "pos": (1800, 450), "color": (200, 100, 200), "size": (120, 110), "type": "mall"},
+    {"name": "Airport", "pos": (2400, 300), "color": (150, 150, 150), "size": (150, 130), "type": "airport"},
+    {"name": "General Hospital", "pos": (350, 1000), "color": (255, 255, 255), "size": (110, 100), "type": "hospital"},
+    {"name": "Police Station", "pos": (150, 1100), "color": (100, 50, 150), "size": (90, 85), "type": "police"},
+    {"name": "City Library", "pos": (900, 1000), "color": (150, 50, 150), "size": (85, 80), "type": "library"},
+    {"name": "Central Park", "pos": (1300, 1100), "color": (100, 200, 100), "size": (120, 100), "type": "park"},
+    {"name": "Chase Bank", "pos": (1800, 1000), "color": (200, 150, 50), "size": (80, 75), "type": "bank"},
+    {"name": "Pizza Hut", "pos": (2400, 1100), "color": (60, 160, 60), "size": (75, 75), "type": "restaurant"},
+    {"name": "Stadium", "pos": (400, 1600), "color": (50, 50, 150), "size": (130, 120), "type": "stadium"},
+    {"name": "Fire Station", "pos": (150, 1750), "color": (50, 50, 200), "size": (90, 85), "type": "fire"},
+    {"name": "Community College", "pos": (850, 1600), "color": (180, 180, 40), "size": (120, 110), "type": "school"},
+    {"name": "McDonald's", "pos": (1300, 1750), "color": (70, 170, 70), "size": (80, 75), "type": "restaurant"},
+    {"name": "Galleria Mall", "pos": (1850, 1600), "color": (210, 110, 210), "size": (130, 120), "type": "mall"},
+    {"name": "St. Mary's Hospital", "pos": (2400, 1750), "color": (240, 240, 240), "size": (100, 90), "type": "hospital"},
+    {"name": "Riverside Park", "pos": (400, 2200), "color": (110, 210, 110), "size": (130, 110), "type": "park"},
+    {"name": "Chevron", "pos": (150, 2300), "color": (0, 110, 210), "size": (85, 75), "type": "gas"},
+    {"name": "Wells Fargo", "pos": (900, 2200), "color": (210, 160, 60), "size": (85, 80), "type": "bank"},
+    {"name": "Taco Bell", "pos": (1350, 2300), "color": (55, 155, 55), "size": (75, 75), "type": "restaurant"},
+    {"name": "Mom's House", "pos": (1850, 2200), "color": (140, 90, 40), "size": (90, 85), "type": "home"},
+    {"name": "Friend's House", "pos": (2400, 2300), "color": (160, 110, 60), "size": (90, 85), "type": "home"},
+]
 
 def create_map():
     img = np.ones((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
@@ -1028,6 +1295,10 @@ def create_map():
         cv2.rectangle(img, (0, y-rw), (MAP_WIDTH, y+rw), road_color, -1)
         for x in range(0, MAP_WIDTH, 80):
             cv2.line(img, (x, y), (min(x+40, MAP_WIDTH), y), line_color, 3)
+    
+    building_icons = {}
+    for ltype in set(l["type"] for l in LANDMARKS):
+        building_icons[ltype] = create_building_icon(ltype, 60, 50)
     
     for landmark in LANDMARKS:
         x, y = landmark["pos"]
@@ -1048,36 +1319,174 @@ def create_map():
     
     return img
 
-# Load recent destinations for display
-def get_suggestions_text(user_id):
-    """Get text for suggested destinations"""
-    recent = get_recent_destinations(user_id, 3)
-    if recent:
-        suggestions = ", ".join([r["name"] for r in recent])
-        return f"Recent: {suggestions}"
-    
-    favorites = get_all_favorites(user_id)
-    if favorites:
-        fav_names = ", ".join([f["name"] for f in favorites[:3]])
-        return f"Favorites: {fav_names}"
-    
-    return "Examples: 'airport', 'stadium', 'save this as home'"
+# ==================== MAIN EXECUTION ====================
 
-add_chat("System", "AI Driver with Memory Ready!")
-add_chat("System", "Try: 'home', 'work', 'save this as gym'")
+init_database()
+current_user_id = login_screen()
+
 world_map = create_map()
 
+# Create traffic lights
+traffic_lights = []
+light_id = 0
+for i, rx in enumerate(ROAD_X[1:-1]):
+    for j, ry in enumerate(ROAD_Y[1:-1]):
+        if (i + j) % 2 == 0:
+            is_vertical = (i % 2 == 0)
+            traffic_lights.append(TrafficLight(rx, ry, 'vertical' if is_vertical else 'horizontal', light_id))
+            light_id += 1
+
+# Create vehicles
+vehicles = []
+next_vehicle_id = 1
+
+# Player vehicle — start on a road intersection
+player_vehicle = VehicleAgent(600, 700, AgentType.HUMAN, 0, (50, 50, 220))
+vehicles.append(player_vehicle)
+
+def spawn_ai_vehicle(agent_type=None):
+    global next_vehicle_id
+
+    if agent_type is None:
+        agent_type = random.choices(
+            [AgentType.AI_RANDOM, AgentType.AI_EFFICIENT, AgentType.AI_AGGRESSIVE],
+            weights=[0.55, 0.30, 0.15]
+        )[0]
+
+    # Try up to 20 times to find a spawn point not too close to existing cars
+    spawn_x, spawn_y = None, None
+    for _ in range(20):
+        rx = random.choice(ROAD_X)
+        ry = random.choice(ROAD_Y)
+        # Spawn either on a horizontal or vertical road segment, not just at intersections
+        if random.random() > 0.5:
+            sx = rx
+            sy = ry + random.randint(-200, 200)
+            sy = max(60, min(MAP_HEIGHT - 60, sy))
+        else:
+            sx = rx + random.randint(-200, 200)
+            sx = max(60, min(MAP_WIDTH - 60, sx))
+            sy = ry
+        # Make sure it's actually on a road
+        if not is_on_road(sx, sy):
+            continue
+        # Not too close to any existing car
+        if any(math.sqrt((v.x-sx)**2 + (v.y-sy)**2) < 100 for v in vehicles):
+            continue
+        spawn_x, spawn_y = sx, sy
+        break
+
+    if spawn_x is None:
+        spawn_x = random.choice(ROAD_X)
+        spawn_y = random.choice(ROAD_Y)
+
+    vehicle = VehicleAgent(spawn_x, spawn_y, agent_type, next_vehicle_id)
+
+    # Pick a destination
+    if LANDMARKS:
+        if agent_type == AgentType.AI_EFFICIENT:
+            target = min(LANDMARKS, key=lambda l:
+                math.sqrt((l["pos"][0]-spawn_x)**2 + (l["pos"][1]-spawn_y)**2))
+        elif agent_type == AgentType.AI_AGGRESSIVE:
+            dists  = [math.sqrt((l["pos"][0]-spawn_x)**2+(l["pos"][1]-spawn_y)**2)
+                      for l in LANDMARKS]
+            total  = sum(dists) or 1
+            target = random.choices(LANDMARKS, weights=[d/total for d in dists], k=1)[0]
+        else:
+            target = random.choice(LANDMARKS)
+
+        dest_pos = get_drop_off_point(target["pos"][0], target["pos"][1])
+        # set_destination sets the angle toward destination and snaps to lane
+        vehicle.set_destination(target["name"], dest_pos, target["pos"])
+    else:
+        # No landmarks
+        nearest_x = min(ROAD_X, key=lambda rx: abs(rx - spawn_x))
+        nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - spawn_y))
+        if abs(spawn_x - nearest_x) < abs(spawn_y - nearest_y):
+            vehicle.angle = random.choice([90, 270])
+        else:
+            vehicle.angle = random.choice([0, 180])
+        vehicle._update_lane_direction(0, 0)
+        vehicle._snap_to_lane()
+
+    # Seed the idle delay so the car leaves immediately
+    vehicle._idle_delay = 0
+
+    vehicles.append(vehicle)
+    next_vehicle_id += 1
+    return vehicle
+
+# Module-level reference so _unstick() can read the vehicles list
+_all_vehicles_ref = vehicles
+
+# Initial traffic — spawn_ai_vehicle already assigns a destination
+for _ in range(12):
+    spawn_ai_vehicle()
+
+chat_history = []
+running = True
 current_input = ""
 input_active = False
-waiting_at_light = False
+show_stats = True
 
+def add_chat(sender, message):
+    chat_history.append((sender, message))
+    if len(chat_history) > 6:
+        chat_history.pop(0)
+
+def draw_traffic_light(img, light, car_x, car_y):
+    scr_x = SCREEN_WIDTH//2 + int(light.x - car_x)
+    scr_y = SIM_HEIGHT//2 + int(light.y - car_y)
+    
+    if not (0 < scr_x < SCREEN_WIDTH and 0 < scr_y < SIM_HEIGHT):
+        return
+        
+    cv2.line(img, (scr_x, scr_y), (scr_x, scr_y - 30), (80, 80, 80), 3)
+    cv2.rectangle(img, (scr_x-8, scr_y-45), (scr_x+8, scr_y-25), (40, 40, 40), -1)
+    
+    if light.state == TrafficLightState.RED:
+        color = (0, 0, 255)
+    elif light.state == TrafficLightState.YELLOW:
+        color = (0, 255, 255)
+    else:
+        color = (0, 255, 0)
+    
+    cv2.circle(img, (scr_x, scr_y-35), 5, color, -1)
+    
+    if light.queue_length > 0:
+        cv2.putText(img, str(light.queue_length), (scr_x+10, scr_y-35),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+
+add_chat("System", "AI Driver ready! Type a destination below.")
+add_chat("System", "Try: 'airport', 'mall', 'hospital', 'gas station'")
+
+frame_count = 0
 while running:
     frame = np.zeros((TOTAL_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8)
     sim = frame[0:SIM_HEIGHT, 0:SCREEN_WIDTH]
     
-    update_traffic_lights()
+    if frame_count % 90 == 0 and len(vehicles) < 25:
+        spawn_ai_vehicle()
     
-    cx, cy = int(car_x), int(car_y)
+    for light in traffic_lights:
+        light.update(vehicles, traffic_lights)
+    
+    for vehicle in vehicles[:]:
+        vehicle.update(world_map, traffic_lights, vehicles)
+        
+        if vehicle.agent_type != AgentType.HUMAN and vehicle.state == "arrived":
+            # Despawn immediately on arrival and spawn a fresh car elsewhere
+            vehicles.remove(vehicle)
+            if len(vehicles) < 22:
+                spawn_ai_vehicle()
+            continue
+
+
+        if vehicle.stuck_counter > 200 and vehicle.agent_type == AgentType.HUMAN:
+            vehicle.x, vehicle.y = snap_to_road(vehicle.x, vehicle.y)
+            vehicle.stuck_counter = 0
+    
+    cx, cy = int(player_vehicle.x), int(player_vehicle.y)
     mx1 = max(0, cx - SCREEN_WIDTH//2)
     my1 = max(0, cy - SIM_HEIGHT//2)
     
@@ -1092,198 +1501,43 @@ while running:
     if y2 > y1 and x2 > x1 and h > 0 and w > 0:
         sim[y1:y2, x1:x2] = visible[max(0,-vy):max(0,-vy)+(y2-y1), max(0,-vx):max(0,-vx)+(x2-x1)]
     
-    sim = draw_traffic_lights(sim, car_x, car_y)
-    draw_tire_tracks(sim, tire_tracks, car_x, car_y)
+    for light in traffic_lights:
+        draw_traffic_light(sim, light, player_vehicle.x, player_vehicle.y)
     
-    if car_speed > 0.5 and car_state == "driving":
-        tire_tracks.append((car_x, car_y, car_angle, 1.0))
-        if len(tire_tracks) > MAX_TRACKS:
-            tire_tracks.pop(0)
+    sorted_vehicles = sorted(vehicles, key=lambda v: v.y)
+    for vehicle in sorted_vehicles:
+        is_player = (vehicle.id == 0)
+        draw_vehicle(sim, vehicle, player_vehicle.x, player_vehicle.y, is_player)
     
-    tire_tracks = [(x, y, a, o*0.97) for x, y, a, o in tire_tracks if o > 0.05]
-    
-    for landmark in LANDMARKS:
-        lx, ly = landmark["pos"]
-        scr_x = SCREEN_WIDTH//2 + int(lx - car_x)
-        scr_y = SIM_HEIGHT//2 + int(ly - car_y)
-        
-        if 0 < scr_x < SCREEN_WIDTH and 0 < scr_y < SIM_HEIGHT:
-            is_dest = (original_goal and 
-                      abs(lx - original_goal[0]) < 10 and 
-                      abs(ly - original_goal[1]) < 10)
-            
-            if is_dest:
-                cv2.circle(sim, (scr_x, scr_y), 35, (0, 255, 255), 3)
-            
-            dist = int(np.sqrt((lx-car_x)**2 + (ly-car_y)**2))
-            if dist < 800:
-                cv2.putText(sim, f"{dist}m", (scr_x-20, scr_y-25), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
-    
-    if car_state == "driving" and current_destination:
-        dx, dy = current_destination
-        scr_dx = SCREEN_WIDTH//2 + int(dx - car_x)
-        scr_dy = SIM_HEIGHT//2 + int(dy - car_y)
-        if 0 < scr_dx < SCREEN_WIDTH and 0 < scr_dy < SIM_HEIGHT:
-            cv2.circle(sim, (scr_dx, scr_dy), 8, (0, 255, 255), -1)
-    
-    # Stuck detection
-    current_pos = (car_x, car_y)
-    moved = np.sqrt((current_pos[0]-last_pos[0])**2 + (current_pos[1]-last_pos[1])**2)
-    
-    if moved < 0.2 and car_state == "driving" and not waiting_at_light and car_speed > 0.1:
-        stuck_counter += 1
-        if stuck_counter > 90:
-            add_chat("Driver", "Stuck! Resetting...")
-            car_x, car_y = snap_to_road(car_x, car_y)
-            if path and waypoint_idx < len(path):
-                wx, wy = path[waypoint_idx]
-                car_angle = np.degrees(np.arctan2(wy - car_y, wx - car_x))
-            car_speed = 1.0
-            stuck_counter = 0
-    else:
-        stuck_counter = 0
-    last_pos = current_pos
-    
-    arrived_this_frame = False
-    if car_state == "driving" and current_destination:
-        dist_to_dest = np.sqrt((car_x-current_destination[0])**2 + (car_y-current_destination[1])**2)
-        
-        if dist_to_dest < 50:
-            car_state = "arrived"
-            car_speed = 0
-            car_x = current_destination[0]
-            car_y = current_destination[1]
-            
-            # Save to history
-            if destination_name:
-                add_to_history(current_user_id, destination_name, 
-                             current_destination[0], current_destination[1])
-            
-            path = []
-            waypoint_idx = 0
-            waiting_at_light = False
-            arrived_this_frame = True
-            add_chat("Driver", f"Arrived at {destination_name}!")
-        
-        elif not path or waypoint_idx >= len(path):
-            path = find_grid_path((car_x, car_y), current_destination)
-            waypoint_idx = 1 if len(path) > 1 else 0
-        
-        elif waypoint_idx < len(path):
-            wx, wy = path[waypoint_idx]
-            wp_dist = np.sqrt((wx-car_x)**2 + (wy-car_y)**2)
-            if wp_dist < 40:
-                waypoint_idx += 1
-    
-    if car_state == "driving" and not arrived_this_frame and path and waypoint_idx < len(path):
-        should_stop, light_dist = check_traffic_light_stop(car_x, car_y, car_angle)
-        
-        if should_stop and light_dist < 120:
-            if not waiting_at_light:
-                waiting_at_light = True
-                add_chat("Driver", "Stopping at red light...")
-            
-            car_speed *= 0.8
-            if car_speed < 0.2:
-                car_speed = 0
-            
-            should_stop, _ = check_traffic_light_stop(car_x, car_y, car_angle)
-            if not should_stop:
-                waiting_at_light = False
-                add_chat("Driver", "Green light! Proceeding...")
-        else:
-            waiting_at_light = False
-            
-            wx, wy = path[waypoint_idx]
-            
-            target_angle = np.degrees(np.arctan2(wy - car_y, wx - car_x))
-            angle_diff = target_angle - car_angle
-            
-            while angle_diff > 180: angle_diff -= 360
-            while angle_diff < -180: angle_diff += 360
-            
-            if abs(angle_diff) > 2:
-                steering = max(-15, min(15, angle_diff * 0.4))
-            else:
-                steering = 0
-            
-            next_wp_dist = np.sqrt((wx-car_x)**2 + (wy-car_y)**2)
-            turn_sharpness = abs(angle_diff)
-            
-            if turn_sharpness > 70:
-                target_speed = 1.5
-            elif turn_sharpness > 40:
-                target_speed = 2.5
-            else:
-                target_speed = max_speed
-            
-            if next_wp_dist < 100 and turn_sharpness > 30:
-                approach_factor = next_wp_dist / 100
-                target_speed = min(target_speed, 1.5 + approach_factor * 2)
-            
-            if should_stop:
-                target_speed = min(target_speed, light_dist / 40)
-            
-            car_angle += steering * 0.25
-            
-            if target_speed < car_speed:
-                car_speed += (target_speed - car_speed) * 0.15
-            else:
-                car_speed += (target_speed - car_speed) * 0.1
-            
-            car_speed = max(0, min(car_speed, max_speed))
-            
-            if car_speed > 0.1:
-                rad = np.radians(car_angle)
-                new_x = car_x + car_speed * np.cos(rad)
-                new_y = car_y + car_speed * np.sin(rad)
-                
-                if is_on_road(new_x, new_y):
-                    car_x, car_y = new_x, new_y
-                else:
-                    car_speed *= 0.3
-                    car_x, car_y = snap_to_road(car_x, car_y)
-    
-    # Draw path
-    if car_state == "driving" and path and len(path) > 1:
-        for i in range(len(path)-1):
-            x1 = SCREEN_WIDTH//2 + int(path[i][0] - car_x)
-            y1 = SIM_HEIGHT//2 + int(path[i][1] - car_y)
-            x2 = SCREEN_WIDTH//2 + int(path[i+1][0] - car_x)
-            y2 = SIM_HEIGHT//2 + int(path[i+1][1] - car_y)
-            cv2.line(sim, (x1,y1), (x2,y2), (0,255,255), 3)
-        
-        for i in range(waypoint_idx, min(waypoint_idx+5, len(path))):
-            wx, wy = path[i]
-            wpx = SCREEN_WIDTH//2 + int(wx - car_x)
-            wpy = SIM_HEIGHT//2 + int(wy - car_y)
-            if 0 < wpx < SCREEN_WIDTH and 0 < wpy < SIM_HEIGHT:
-                cv2.circle(sim, (wpx, wpy), 6, (0,255,0), -1)
-    
-    cs_x, cs_y = SCREEN_WIDTH//2, SIM_HEIGHT//2
-    rotated_car, _ = rotate_sprite(car_sprite, car_angle)
-    draw_sprite_on_image(sim, rotated_car, cs_x, cs_y, shadow=True)
-    
-    status = f"{car_state.upper()}"
-    if waiting_at_light:
-        status = "STOPPING (RED LIGHT)"
-    if destination_name and car_state != "idle":
-        status += f" | To: {destination_name[:12]}"
-        if car_state == "driving":
-            dist = int(np.sqrt((car_x-current_destination[0])**2 + (car_y-current_destination[1])**2))
-            status += f" ({dist}m)"
-    
-    cv2.putText(sim, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-    cv2.putText(sim, f"Speed: {car_speed:.1f}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200,200,200), 1)
+    # Draw route path for player
+    if player_vehicle.state == "driving" and player_vehicle.path:
+        for i in range(len(player_vehicle.path)-1):
+            px1 = SCREEN_WIDTH//2 + int(player_vehicle.path[i][0] - player_vehicle.x)
+            py1 = SIM_HEIGHT//2 + int(player_vehicle.path[i][1] - player_vehicle.y)
+            px2 = SCREEN_WIDTH//2 + int(player_vehicle.path[i+1][0] - player_vehicle.x)
+            py2 = SIM_HEIGHT//2 + int(player_vehicle.path[i+1][1] - player_vehicle.y)
+            cv2.line(sim, (px1, py1), (px2, py2), (0, 255, 255), 2)
+        # Draw next waypoint marker
+        if player_vehicle.waypoint_idx < len(player_vehicle.path):
+            nwx, nwy = player_vehicle.path[player_vehicle.waypoint_idx]
+            nsx = SCREEN_WIDTH//2 + int(nwx - player_vehicle.x)
+            nsy = SIM_HEIGHT//2 + int(nwy - player_vehicle.y)
+            cv2.circle(sim, (nsx, nsy), 6, (255, 128, 0), -1)
     
     cv2.rectangle(frame, (0, SIM_HEIGHT), (SCREEN_WIDTH, TOTAL_HEIGHT), (30,30,30), -1)
     cv2.line(frame, (0, SIM_HEIGHT), (SCREEN_WIDTH, SIM_HEIGHT), (100,100,100), 3)
+
     
-    cv2.putText(frame, "TEXT ASSISTANT - Press ESC or Q to quit", (15, SIM_HEIGHT+25), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+    status = f"Player: {player_vehicle.state.upper()}"
+    if player_vehicle.in_queue:
+        status += " [FOLLOWING]"
+    if player_vehicle.destination_name:
+        status += f" | To: {player_vehicle.destination_name[:15]}"
+    cv2.putText(sim, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+    cv2.putText(sim, f"Speed: {player_vehicle.speed:.1f}  WP: {player_vehicle.waypoint_idx}/{max(0,len(player_vehicle.path)-1)}", 
+                (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
     
-    y = SIM_HEIGHT + 55
+    y = SIM_HEIGHT + 30
     for sender, msg in chat_history:
         if sender == "User":
             color = (0, 200, 255)
@@ -1294,96 +1548,80 @@ while running:
         else:
             color = (200, 200, 200)
             prefix = ""
+        cv2.putText(frame, prefix + msg[:70], (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        y += 25
+    
+    input_y = TOTAL_HEIGHT - 40
+    cv2.rectangle(frame, (20, input_y-10), (SCREEN_WIDTH-120, input_y+20), (60,60,60), -1)
+    cv2.putText(frame, "> " + current_input + ("_" if input_active else ""), (30, input_y+10), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+    
+    if show_stats:
+        total_wait = sum(v.total_wait_time for v in vehicles)
+        avg_speed = sum(v.speed for v in vehicles) / len(vehicles) if vehicles else 0
+        in_queue = len([v for v in vehicles if v.in_queue])
         
-        text = prefix + msg
-        if len(text) > 70:
-            text = text[:67] + "..."
-        
-        cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        y += 28
+        cv2.rectangle(frame, (20, SIM_HEIGHT+130), (320, SIM_HEIGHT+220), (30, 30, 30), -1)
+        cv2.putText(frame, "TRAFFIC STATS", (30, SIM_HEIGHT+150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.putText(frame, f"Vehicles: {len(vehicles)}  Queued: {in_queue}", (30, SIM_HEIGHT+170),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        cv2.putText(frame, f"Avg Speed: {avg_speed:.1f}  Wait: {total_wait:.0f}s", (30, SIM_HEIGHT+190),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        cv2.putText(frame, "1=Random  2=Efficient  3=Aggressive  A=Toggle lights  T=Stats",
+                    (30, SIM_HEIGHT+210), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1)
     
-    input_y = TOTAL_HEIGHT - 50
-    cv2.rectangle(frame, (20, input_y-10), (SCREEN_WIDTH-120, input_y+30), (60,60,60), -1)
-    cv2.rectangle(frame, (20, input_y-10), (SCREEN_WIDTH-120, input_y+30), (150,150,150), 2)
+    cv2.putText(frame, "Blue=You  Red=Random  Green=Efficient  Yellow=Aggressive | dot=Following", 
+                (20, TOTAL_HEIGHT-10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150,150,150), 1)
     
-    prompt = "> " + current_input + ("_" if input_active else "")
-    cv2.putText(frame, prompt, (30, input_y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
-    
-    cv2.putText(frame, "ENTER to send", (SCREEN_WIDTH-110, input_y+15), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150,150,150), 1)
-    
-    # Show suggestions
-    suggestions = get_suggestions_text(current_user_id)
-    cv2.putText(frame, suggestions, (20, TOTAL_HEIGHT-15), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150,150,150), 1)
-    
-    cv2.imshow("AI Driver - Working Grid", frame)
+    cv2.imshow("AI Driver - Realistic Traffic", frame)
     
     key = cv2.waitKey(30) & 0xFF
     
-    if key == 27 or key == ord('q') or key == ord('Q'):
+    if key == 27 or key == ord('q'):
         running = False
-        break
+    elif key == ord('1'):
+        spawn_ai_vehicle(AgentType.AI_RANDOM)
+        add_chat("System", "Spawned: Random AI")
+    elif key == ord('2'):
+        spawn_ai_vehicle(AgentType.AI_EFFICIENT)
+        add_chat("System", "Spawned: Efficient AI")
+    elif key == ord('3'):
+        spawn_ai_vehicle(AgentType.AI_AGGRESSIVE)
+        add_chat("System", "Spawned: Aggressive AI")
+    elif key == ord('t'):
+        show_stats = not show_stats
+    elif key == ord('a'):
+        for light in traffic_lights:
+            light.adaptive_mode = not light.adaptive_mode
+        mode = "AI-Adaptive" if traffic_lights[0].adaptive_mode else "Fixed-Timing"
+        add_chat("System", f"Traffic lights: {mode}")
     elif key == 13 and current_input.strip():
-        add_chat("User", current_input)
+        user_text = current_input.strip()
+        add_chat("User", user_text)
         
-        # Check for user switch command
-        user_match = re.match(r"user (\w+)", current_input.lower())
-        if user_match:
-            username = user_match.group(1)
-            current_user_id = get_or_create_user(username)
-            if current_user_id:
-                add_chat("System", f"Switched to user: {username}")
-            else:
-                add_chat("System", f"User '{username}' not found. Please login first.")
+        dest_name, road_pos, orig_pos = parse_destination(
+            user_text, player_vehicle.x, player_vehicle.y, current_user_id
+        )
+        
+        if dest_name and road_pos:
+            player_vehicle.set_destination(dest_name, road_pos, orig_pos)
+            add_chat("Driver", f"Navigating to {dest_name}...")
+        elif dest_name:
+            # Message but no navigation target (e.g. "No home saved yet")
+            add_chat("Driver", dest_name)
         else:
-            # Parse destination with user context
-            result = parse_destination(current_input, car_x, car_y, current_user_id)
-            
-            if result[0] and result[1]:  # Valid destination
-                dest_name, road_pos, orig_pos = result
-                destination_name = dest_name
-                current_destination = road_pos
-                original_goal = orig_pos
-                
-                # Snap to road before starting
-                car_x, car_y = snap_to_road(car_x, car_y)
-                
-                path = find_grid_path((car_x, car_y), current_destination)
-                waypoint_idx = 1 if len(path) > 1 else 0
-                car_state = "driving"
-                car_speed = 2.0
-                stuck_counter = 0
-                waiting_at_light = False
-                tire_tracks = []
-                
-                dist = int(np.sqrt((road_pos[0]-car_x)**2 + (road_pos[1]-car_y)**2))
-                add_chat("Driver", f"Going to {dest_name} ({dist}m)...")
-            elif result[0]: 
-                add_chat("Driver", result[0])
-            else:
-                add_chat("Driver", "I don't know that place. Try: 'home', 'mall', 'save this as work'...")
+            add_chat("Driver", "Unknown destination. Try: 'airport', 'mall', 'hospital'")
         
         current_input = ""
         input_active = False
     elif key == 8:
         current_input = current_input[:-1]
-    elif key == 9:
-        input_active = not input_active
     elif 32 <= key < 127 and len(current_input) < 60:
         current_input += chr(key)
         input_active = True
-    elif key == ord('g'):
-        current_input = "gas station"
-    elif key == ord('s'):
-        current_input = "school"
-    elif key == ord('r'):
-        current_input = "restaurant"
-    elif key == ord('p'):
-        current_input = "park"
+    
+    frame_count += 1
 
-print("Cleaning up...")
 cv2.destroyAllWindows()
-for i in range(5):
-    cv2.waitKey(1)
 sys.exit(0)
