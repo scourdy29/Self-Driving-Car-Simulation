@@ -1,4 +1,4 @@
-#Login and registration OpenCV screens
+# Login and registration OpenCV screens
 
 import sys
 import cv2
@@ -8,7 +8,6 @@ from database import register_user, authenticate_user
 
 
 def registration_screen():
-    """Show the registration form. Returns user_id on success, None if cancelled."""
     username, password, confirm = "", "", ""
     active = "username"
     message, msg_color = "", (0, 0, 255)
@@ -82,7 +81,6 @@ def registration_screen():
 
 
 def login_screen():
-    """Show the login form. Returns user_id on successful login; exits on ESC."""
     username, password = "", ""
     active = "username"
     message, msg_color = "", (0, 0, 255)
@@ -152,7 +150,7 @@ def login_screen():
                 password += ch
 
 
-#Utility
+# Utility
 def _wrap(text: str, width: int):
     words, lines, line = text.split(), [], ""
     for w in words:
