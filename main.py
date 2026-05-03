@@ -1,4 +1,4 @@
-# entry point: game loop, spawning, HUD rendering
+# main.py
 
 import sys
 import math
@@ -16,32 +16,39 @@ import traffic  as _traffic_module
 from rendering  import (create_map, draw_vehicle, draw_traffic_light)
 from navigation import parse_destination
 from ui         import login_screen
+from weather    import WeatherSystem
+from minimap    import build_minimap_base, draw_minimap
 
 
-# Initialisation
+# Initalization
+
 init_database()
 current_user_id = login_screen()
 world_map       = create_map()
+weather         = WeatherSystem()
+minimap_base    = build_minimap_base()
 
-# Traffic lights at every other intersection
+# Traffic lights
 traffic_lights = []
-for i, rx in enumerate(ROAD_X[1:-1]):
-    for j, ry in enumerate(ROAD_Y[1:-1]):
-        if (i + j) % 2 == 0:
-            orientation = 'vertical' if i % 2 == 0 else 'horizontal'
-            traffic_lights.append(TrafficLight(rx, ry, orientation, len(traffic_lights)))
+half_cycle = 150 + 30  # green and yellow duration
+for rx in ROAD_X[1:-1]:
+    for ry in ROAD_Y[1:-1]:
+        lid = len(traffic_lights)
+        traffic_lights.append(TrafficLight(rx, ry, 'horizontal', lid,   phase_offset=0))
+        traffic_lights.append(TrafficLight(rx, ry, 'vertical',   lid+1, phase_offset=half_cycle))
 
 # Vehicle list
 vehicles       = []
 next_vehicle_id = 1
-_traffic_module._all_vehicles_ref = vehicles   # give traffic.py a live reference
+_traffic_module._all_vehicles_ref = vehicles
 
 # Vehicle
 player_vehicle = VehicleAgent(600, 700, AgentType.HUMAN, 0, (50, 50, 220))
 vehicles.append(player_vehicle)
 
 
-# Spawn helper
+# Spawning 
+
 def spawn_ai_vehicle(agent_type=None):
     global next_vehicle_id
 
@@ -86,7 +93,7 @@ def spawn_ai_vehicle(agent_type=None):
             target = random.choice(LANDMARKS)
 
         v.set_destination(target["name"],
-                          get_drop_off_point(*target["pos"]),
+                          get_drop_off_point(*target["pos"], target["name"]),
                           target["pos"])
     v._idle_delay = 0
     vehicles.append(v)
@@ -95,11 +102,12 @@ def spawn_ai_vehicle(agent_type=None):
 
 
 # Initial traffic
+
 for _ in range(12):
     spawn_ai_vehicle()
 
+# HUD State
 
-# Chat and UI state
 chat_history  = []
 running       = True
 current_input = ""
@@ -116,8 +124,8 @@ def add_chat(sender, message):
 add_chat("System", "AI Driver ready! Type a destination below.")
 add_chat("System", "Try: 'airport', 'mall', 'hospital', 'gas station'")
 
-
 # Main loop
+
 frame_count = 0
 
 while running:
@@ -128,9 +136,14 @@ while running:
     if frame_count % 90 == 0 and len(vehicles) < 25:
         spawn_ai_vehicle()
 
+    # Update weather
+    weather.update()
+    weather.apply_to_vehicles(vehicles)
+
     # Update traffic lights
     for light in traffic_lights:
-        light.update(vehicles, traffic_lights)
+        if not getattr(light, '_frozen', False):
+            light.update(vehicles, traffic_lights)
 
     # Update vehicles
     for vehicle in vehicles[:]:
@@ -143,11 +156,11 @@ while running:
             continue
 
         if vehicle.stuck_counter > 200 and vehicle.agent_type == AgentType.HUMAN:
-            vehicle.x, vehicle.y = snap_to_road(vehicle.x, vehicle.y)
+            vehicle.x, vehicle.y = snap_to_road(vehicle.x, vehicle.y, vehicle.lane_offset)
             vehicle.stuck_counter = 0
 
-
     # Rendering
+
     cx  = int(player_vehicle.x)
     cy  = int(player_vehicle.y)
     mx1 = max(0, cx - SCREEN_WIDTH // 2)
@@ -186,6 +199,15 @@ while running:
                        (SCREEN_WIDTH // 2 + int(nwx - player_vehicle.x),
                         SIM_HEIGHT   // 2 + int(nwy - player_vehicle.y)),
                        6, (255, 128, 0), -1)
+
+    # Weather overlay
+    weather.apply_overlay(sim)
+    weather.draw_headlights(sim, vehicles, player_vehicle.x, player_vehicle.y)
+    weather.draw_hud(sim)
+
+    # Minimap
+    draw_minimap(frame, minimap_base, vehicles, player_vehicle,
+                 player_vehicle.x, player_vehicle.y)
 
     # HUD
     status = f"Player: {player_vehicle.state.upper()}"
@@ -232,7 +254,7 @@ while running:
                     (30, SIM_HEIGHT + 170), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
         cv2.putText(frame, f"Avg Speed: {avg_speed:.1f}  Wait: {total_wait:.0f}s",
                     (30, SIM_HEIGHT + 190), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-        cv2.putText(frame, "1=Random  2=Efficient  3=Aggressive  A=Lights  T=Stats",
+        cv2.putText(frame, "1=Random  2=Efficient  3=Aggressive  A=Lights  T=Stats  W=Weather",
                     (30, SIM_HEIGHT + 210), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1)
 
     cv2.putText(frame, "Blue=You  Red=Random  Green=Efficient  Yellow=Aggressive",
@@ -240,8 +262,8 @@ while running:
 
     cv2.imshow("AI Driver - Realistic Traffic", frame)
 
-
     # Input handling
+
     key = cv2.waitKey(30) & 0xFF
 
     if key == 27 or key == ord('q'):
@@ -254,10 +276,15 @@ while running:
         spawn_ai_vehicle(AgentType.AI_AGGRESSIVE); add_chat("System", "Spawned: Aggressive AI")
     elif key == ord('t'):
         show_stats = not show_stats
+    elif key == ord('w'):
+        new_wx = weather.cycle()
+        add_chat("System", f"Weather: {new_wx}")
     elif key == ord('a'):
-        for light in traffic_lights:
-            light.adaptive_mode = not light.adaptive_mode
-        add_chat("System", "Lights: " + ("Adaptive" if traffic_lights[0].adaptive_mode else "Fixed"))
+        if not hasattr(traffic_lights[0], '_frozen'):
+            for l in traffic_lights: l._frozen = False
+        frozen = not traffic_lights[0]._frozen
+        for l in traffic_lights: l._frozen = frozen
+        add_chat("System", "Lights: " + ("Frozen" if frozen else "Running"))
     elif key == 13 and current_input.strip():
         user_text = current_input.strip()
         add_chat("User", user_text)
