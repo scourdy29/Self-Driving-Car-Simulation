@@ -1,10 +1,10 @@
-#Text destination parsing and landmark lookup
+# navigation.py
 
 import re
 import math
 
 from config   import LANDMARKS
-from road     import get_drop_off_point
+from road     import get_drop_off_point, get_driveway_point
 from database import get_favorite
 
 TYPE_KEYWORDS = {
@@ -41,11 +41,11 @@ def find_closest_landmark(car_x, car_y, landmark_type):
 def parse_destination(text: str, car_x: float, car_y: float, user_id: int):
     text = text.lower().strip()
 
-    #Save command
+    # Save command
     if re.match(r"save (?:this|location|place) as (.+)", text):
         return "Save command processed", None, None
 
-    #Saved favorite shortcut
+    # Saved favorite shortcut
     for cmd in FAVORITE_NAMES:
         if text in [cmd, f"my {cmd}", f"go to {cmd}",
                     f"take me to {cmd}", f"drive to {cmd}", f"navigate to {cmd}"]:
@@ -54,27 +54,27 @@ def parse_destination(text: str, car_x: float, car_y: float, user_id: int):
                 return fav["landmark_name"], (fav["x"], fav["y"]), (fav["x"], fav["y"])
             return f"No {cmd} saved yet", None, None
 
-    #Strip leading navigation verbs and articles
+    # Strip leading navigation verbs and articles
     text = re.sub(
         r"^(take me to|drive to|go to|navigate to|i want to go to|let's go to|nearest|closest)\s*",
         "", text
     )
     text = re.sub(r"^(the|a|an)\s+", "", text).strip(" .!?")
 
-    #Exact / Substring landmark name match
+    # Exact / substring landmark name match
     for lm in LANDMARKS:
         if lm["name"].lower() in text or text in lm["name"].lower():
             lx, ly    = lm["pos"]
-            road_pos  = get_drop_off_point(lx, ly)
+            road_pos  = get_drop_off_point(lx, ly, lm["name"])
             return lm["name"], road_pos, (lx, ly)
 
-    #Keyword → type → nearest
+    # Keyword → type → nearest
     for keyword, ltype in TYPE_KEYWORDS.items():
         if keyword in text:
             closest, _ = find_closest_landmark(car_x, car_y, ltype)
             if closest:
                 lx, ly   = closest["pos"]
-                road_pos = get_drop_off_point(lx, ly)
+                road_pos = get_drop_off_point(lx, ly, closest["name"])
                 return closest["name"], road_pos, (lx, ly)
 
     return None, None, None
