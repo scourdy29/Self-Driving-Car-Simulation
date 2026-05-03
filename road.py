@@ -1,7 +1,7 @@
-#Road geometry helpers and grid pathfinder
+# road.py
 
 import math
-from config import ROAD_X, ROAD_Y, ROAD_HALF_WIDTH, MAP_WIDTH, MAP_HEIGHT
+from config import ROAD_X, ROAD_Y, ROAD_HALF_WIDTH, MAP_WIDTH, MAP_HEIGHT, PARKING_LOTS
 
 
 def is_on_road(x: float, y: float) -> bool:
@@ -14,31 +14,43 @@ def is_on_road(x: float, y: float) -> bool:
     return False
 
 
-def snap_to_road(x: float, y: float):
+def snap_to_road(x: float, y: float, lane_offset: int = 0):
     nearest_x = min(ROAD_X, key=lambda rx: abs(rx - x))
     nearest_y = min(ROAD_Y, key=lambda ry: abs(ry - y))
     if abs(nearest_x - x) <= abs(nearest_y - y):
-        return (nearest_x, y)
-    return (x, nearest_y)
+        return (nearest_x + lane_offset, y)
+    return (x, nearest_y + lane_offset)
 
 
-def get_drop_off_point(landmark_x: float, landmark_y: float):
+def get_drop_off_point(landmark_x: float, landmark_y: float, name: str = ""):
+    if name and name in PARKING_LOTS:
+        return PARKING_LOTS[name]["spot"]
+
+    # Fallback for landmarks
     best_v = min(ROAD_X, key=lambda rx: abs(rx - landmark_x))
     best_h = min(ROAD_Y, key=lambda ry: abs(ry - landmark_y))
-
     if abs(best_v - landmark_x) <= abs(best_h - landmark_y):
-        #Nearest road is vertical
         offset = 20 if landmark_x > best_v else -20
         road_y = max(50, min(MAP_HEIGHT - 50, landmark_y))
         return (best_v + offset, road_y)
     else:
-        #Nearest road is horizontal
         offset = 20 if landmark_y > best_h else -20
         road_x = max(50, min(MAP_WIDTH - 50, landmark_x))
         return (road_x, best_h + offset)
 
 
-def find_grid_path(start, goal):
+def get_driveway_point(name: str):
+    if name in PARKING_LOTS:
+        return PARKING_LOTS[name]["driveway"]
+    return None
+
+
+def lane_pos(road_centre: float, direction_sign: int, lane_w: int = 18) -> float:
+    return road_centre + lane_w * direction_sign
+
+
+def find_grid_path(start, goal, start_angle_deg: float = None):
+    import math as _math
     LANE_W = 18
     sx, sy = start
     gx, gy = goal
@@ -48,55 +60,89 @@ def find_grid_path(start, goal):
     goal_rx  = min(ROAD_X, key=lambda rx: abs(rx - gx))
     goal_ry  = min(ROAD_Y, key=lambda ry: abs(ry - gy))
 
-    raw = [(sx, sy, 0, 0)]
-    cur_x, cur_y = start_rx, start_ry
-
     h_dist = abs(goal_rx - start_rx)
     v_dist = abs(goal_ry - start_ry)
+    dxs = 1 if goal_rx >= start_rx else -1
+    dys = 1 if goal_ry >= start_ry else -1
 
-    if h_dist >= v_dist:
-        dx_sign = 1 if goal_rx >= cur_x else -1
-        xs = sorted(x for x in ROAD_X if min(cur_x, goal_rx) <= x <= max(cur_x, goal_rx))
-        if dx_sign < 0: xs = xs[::-1]
-        for x in xs:
-            raw.append((x, cur_y, dx_sign, 0))
+    # Determine preferred axis order by distance
+    h_first = (h_dist >= v_dist)
+
+    # Anti-U-turn
+    if start_angle_deg is not None and h_dist > 0 and v_dist > 0:
+        rad = _math.radians(start_angle_deg)
+        cos_h = _math.cos(rad)
+        sin_h = _math.sin(rad)
+        moving_h = abs(cos_h) >= abs(sin_h)
+
+        if h_first and moving_h:
+            # Going horizontal first
+            current_dx = 1 if cos_h >= 0 else -1
+            if current_dx != dxs:
+                h_first = False  # swap: go vertical first to avoid U-turn
+        elif not h_first and not moving_h:
+            # Going vertical first
+            current_dy = 1 if sin_h >= 0 else -1
+            if current_dy != dys:
+                h_first = True  # swap: go horizontal first to avoid U-turn
+
+    def h_leg(cur_x, cur_y):
+        if goal_rx == cur_x:
+            return []
+        xs = sorted(x for x in ROAD_X
+                    if min(cur_x, goal_rx) <= x <= max(cur_x, goal_rx))
+        if dxs < 0: xs = xs[::-1]
+        return [(x, cur_y, 'h', dxs) for x in xs]
+
+    def v_leg(cur_x, cur_y):
+        if goal_ry == cur_y:
+            return []
+        ys = sorted(y for y in ROAD_Y
+                    if min(cur_y, goal_ry) <= y <= max(cur_y, goal_ry))
+        if dys < 0: ys = ys[::-1]
+        return [(cur_x, y, 'v', dys) for y in ys]
+
+    cur_x, cur_y = start_rx, start_ry
+    if h_first:
+        steps = h_leg(cur_x, cur_y)
         cur_x = goal_rx
-
-        dy_sign = 1 if goal_ry >= cur_y else -1
-        ys = sorted(y for y in ROAD_Y if min(cur_y, goal_ry) <= y <= max(cur_y, goal_ry))
-        if dy_sign < 0: ys = ys[::-1]
-        for y in ys:
-            raw.append((cur_x, y, 0, dy_sign))
+        steps += v_leg(cur_x, cur_y)
     else:
-        dy_sign = 1 if goal_ry >= cur_y else -1
-        ys = sorted(y for y in ROAD_Y if min(cur_y, goal_ry) <= y <= max(cur_y, goal_ry))
-        if dy_sign < 0: ys = ys[::-1]
-        for y in ys:
-            raw.append((cur_x, y, 0, dy_sign))
+        steps = v_leg(cur_x, cur_y)
         cur_y = goal_ry
+        steps += h_leg(cur_x, cur_y)
 
-        dx_sign = 1 if goal_rx >= cur_x else -1
-        xs = sorted(x for x in ROAD_X if min(cur_x, goal_rx) <= x <= max(cur_x, goal_rx))
-        if dx_sign < 0: xs = xs[::-1]
-        for x in xs:
-            raw.append((x, cur_y, dx_sign, 0))
-
-    raw.append((gx, gy, 0, 0))
-
-    #Convert the center line points to lane offset points
+    # This keeps the car in its correct lane
     path = []
-    for x, y, dxs, dys in raw:
-        if dxs != 0:
-            path.append((x, y + LANE_W * dxs))
-        elif dys != 0:
-            path.append((x + LANE_W * dys, y))
-        else:
-            path.append((x, y))
+    prev_axis  = None
+    last_lane_x = None   # x position of last vertical leg
+    last_lane_y = None   # y position of last horizontal leg
 
-    #Deduplicate nearby points
+    for rx, ry, axis, dsign in steps:
+        if axis == 'h':
+            lane_y = lane_pos(ry, dsign, LANE_W)
+            if prev_axis == 'v':
+                # Transitioning from vertical to horizontal.
+                path.append((last_lane_x, lane_y))
+            path.append((rx, lane_y))
+            last_lane_y = lane_y
+        else:  # 'v'
+            lane_x = lane_pos(rx, dsign, LANE_W)
+            if prev_axis == 'h':
+                # Transitioning from horizontal to vertical.
+                path.append((lane_x, last_lane_y))
+            path.append((lane_x, ry))
+            last_lane_x = lane_x
+        prev_axis = axis
+
+    if not path:
+        path.append((gx, gy))
+    else:
+        path.append((gx, gy))
+
+    # Deduplicate
     filtered = []
     for p in path:
-        if not filtered or abs(p[0] - filtered[-1][0]) > 2 or abs(p[1] - filtered[-1][1]) > 2:
+        if not filtered or abs(p[0]-filtered[-1][0]) > 2 or abs(p[1]-filtered[-1][1]) > 2:
             filtered.append(p)
-
     return filtered
