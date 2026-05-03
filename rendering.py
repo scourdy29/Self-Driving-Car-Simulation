@@ -1,14 +1,15 @@
-#Sprite creation, drawing helpers, map generation and HUD
+# rendering.py
 
 import cv2
 import numpy as np
 
 from config  import (ROAD_X, ROAD_Y, ROAD_HALF_WIDTH, MAP_WIDTH, MAP_HEIGHT,
-                     SCREEN_WIDTH, SIM_HEIGHT, LANDMARKS)
+                     SCREEN_WIDTH, SIM_HEIGHT, LANDMARKS, PARKING_LOTS)
 from traffic import AgentType
 
 
-# Sprite helpers
+# Sprite creation
+
 def create_car_sprite(width=36, height=22, body_color=None):
     img = np.zeros((height, width, 4), dtype=np.uint8)
     bc  = (*(body_color or (50, 50, 220)), 255)
@@ -83,7 +84,8 @@ def draw_sprite_on_image(bg, sprite, x, y, shadow=False):
         )
 
 
-#Draw vehicle
+# Vehicle drawing
+
 def draw_vehicle(img, vehicle, cam_x, cam_y, is_player=False):
     if is_player:
         sx, sy = SCREEN_WIDTH // 2, SIM_HEIGHT // 2
@@ -113,7 +115,8 @@ def draw_vehicle(img, vehicle, cam_x, cam_y, is_player=False):
             cv2.line(img, (sx, sy), (ax, ay), (255, 255, 0), 1)
 
 
-#Draw traffic lights
+# Traffic light drawing
+
 def draw_traffic_light(img, light, cam_x, cam_y):
     from traffic import TrafficLightState
     sx = SCREEN_WIDTH // 2 + int(light.x - cam_x)
@@ -137,6 +140,7 @@ def draw_traffic_light(img, light, cam_x, cam_y):
 
 
 # Building icons
+
 def create_building_icon(building_type, width=60, height=50):
     icon = np.zeros((height, width, 4), dtype=np.uint8)
     palette = {
@@ -180,7 +184,8 @@ def create_building_icon(building_type, width=60, height=50):
     return icon
 
 
-#Generate Map
+# Map generation
+
 def create_map():
     img = np.ones((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
     img[:] = (70, 130, 70)
@@ -215,5 +220,26 @@ def create_map():
                 )
         cv2.putText(img, lm["name"][:12], (x - 45, y + ih // 2 + 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    # Parking lots
+    for lm in LANDMARKS:
+        name = lm["name"]
+        if name not in PARKING_LOTS:
+            continue
+        spot = PARKING_LOTS[name]["spot"]
+        drwy = PARKING_LOTS[name]["driveway"]
+        sx, sy = int(spot[0]), int(spot[1])
+        dx, dy = int(drwy[0]), int(drwy[1])
+        # Parking area box
+        cv2.rectangle(img, (sx - 20, sy - 15), (sx + 20, sy + 15), (160, 160, 160), -1)
+        cv2.rectangle(img, (sx - 20, sy - 15), (sx + 20, sy + 15), (100, 100, 100),  1)
+        # Driveway connector line
+        cv2.line(img, (sx, sy), (dx, dy), (130, 130, 130), 3)
+        # Parking spot line markings
+        for offset in [-8, 0, 8]:
+            if abs(sx - dx) > abs(sy - dy):  # horizontal driveway
+                cv2.line(img, (sx + offset, sy - 15), (sx + offset, sy + 15), (200, 200, 200), 1)
+            else:
+                cv2.line(img, (sx - 20, sy + offset), (sx + 20, sy + offset), (200, 200, 200), 1)
 
     return img
